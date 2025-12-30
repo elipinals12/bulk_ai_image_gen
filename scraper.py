@@ -15,6 +15,8 @@ from bs4 import BeautifulSoup
 from PIL import Image
 from io import BytesIO
 from tqdm import tqdm
+from datetime import datetime
+from collections import defaultdict
 
 # ============================================================================
 # Configuration
@@ -42,19 +44,103 @@ SAMPLE_INTERVAL = 20  # Sample every N pixels along perimeter
 REQUEST_DELAY = 0.5
 
 # ============================================================================
+# Global error tracking
+# ============================================================================
+
+# Dictionary to collect errors by category
+error_log = defaultdict(list)
+
+# ============================================================================
 # Helper Functions
 # ============================================================================
 
-def log_skip(console_msg, log_msg):
-    """Log skip/error message to console and log file separately"""
-    # tqdm.write prints without disrupting progress bar
-    tqdm.write(f"  {console_msg}")
+def log_skip(error_category, sku, product_name, details):
+    """
+    Add error to categorized log (will be written at end).
     
+    Args:
+        error_category: Category of error (e.g., "Background Too Dark", "Download Error")
+        sku: Product SKU
+        product_name: Product name
+        details: Additional details about the error
+    """
+    error_log[error_category].append({
+        'sku': sku,
+        'name': product_name,
+        'details': details
+    })
+
+
+def write_log_file(total_products, successful, skipped):
+    """
+    Write organized log file with all errors grouped by category.
+    Includes header with title, timestamp, and comprehensive summary.
+    
+    Args:
+        total_products: Total number of products attempted
+        successful: Number of successfully downloaded images
+        skipped: Number of skipped images
+    """
     try:
-        with open(LOG_FILE, 'a', encoding='utf-8') as f:
-            f.write(f"{log_msg}\n")
+        with open(LOG_FILE, 'w', encoding='utf-8') as f:
+            # Header
+            f.write("="*80 + "\n")
+            f.write("PRODUCT IMAGE SCRAPER - ERROR LOG\n")
+            f.write("="*80 + "\n")
+            f.write(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"Source: {BASE_URL}\n")
+            f.write("="*80 + "\n\n")
+            
+            # Write each error category
+            for category, errors in sorted(error_log.items()):
+                f.write(f"\n{'='*80}\n")
+                f.write(f"{category.upper()} ({len(errors)} items)\n")
+                f.write(f"{'='*80}\n\n")
+                
+                for error in errors:
+                    sku = error['sku']
+                    name = error['name']
+                    details = error['details']
+                    
+                    f.write(f"SKU: {sku}\n")
+                    f.write(f"Product: {name}\n")
+                    f.write(f"Details: {details}\n")
+                    f.write("-" * 80 + "\n")
+            
+            # Comprehensive summary at end
+            total_errors = sum(len(errors) for errors in error_log.values())
+            success_rate = (successful / total_products * 100) if total_products > 0 else 0
+            error_rate = (total_errors / total_products * 100) if total_products > 0 else 0
+            
+            # Get specific error counts
+            bg_dark_count = len(error_log.get("Background Too Dark", []))
+            other_errors_count = total_errors - bg_dark_count
+            
+            f.write(f"\n{'='*80}\n")
+            f.write(f"SUMMARY\n")
+            f.write(f"{'='*80}\n\n")
+            
+            # Overall statistics
+            f.write(f"Total products processed:      {total_products}\n")
+            f.write(f"Successfully downloaded:       {successful} ({success_rate:.1f}%)\n")
+            f.write(f"Skipped (errors):              {skipped} ({error_rate:.1f}%)\n\n")
+            
+            # Breakdown by error type
+            f.write(f"Error breakdown:\n")
+            f.write(f"  Non-white background:        {bg_dark_count} ({bg_dark_count/total_products*100 if total_products > 0 else 0:.1f}%)\n")
+            f.write(f"  Other errors:                {other_errors_count} ({other_errors_count/total_products*100 if total_products > 0 else 0:.1f}%)\n\n")
+            
+            # Detailed error categories
+            if error_log:
+                f.write(f"Detailed error categories:\n")
+                for category, errors in sorted(error_log.items()):
+                    pct = (len(errors) / total_products * 100) if total_products > 0 else 0
+                    f.write(f"  {category}: {len(errors)} ({pct:.1f}%)\n")
+            
+            f.write("\n" + "="*80 + "\n")
+            
     except Exception as e:
-        tqdm.write(f"  Warning: Couldn't write to log file: {e}")
+        print(f"Warning: Couldn't write log file: {e}")
 
 
 def load_categories():
@@ -83,8 +169,8 @@ def sanitize_filename(name):
     name = name.replace('<', '')
     name = name.replace('>', '')
     name = name.replace('|', '')
-    name = name.replace('™', '')
-    name = name.replace('®', '')
+    name = name.replace('â„¢', '')
+    name = name.replace('Â®', '')
     
     # Remove extra whitespace
     name = re.sub(r'\s+', ' ', name).strip()
@@ -138,16 +224,26 @@ def is_white_background(image_path, product_name, sku):
         is_white = white_ratio >= WHITE_PERCENTAGE
         
         if not is_white:
-            console_msg = f"!!! SKIP - BACKGROUND TOO DARK !!! White pixels: {white_ratio*100:.1f}% (needs {WHITE_PERCENTAGE*100:.1f}%)"
-            log_msg = f"{sku} - {product_name}: Background too dark - {white_ratio*100:.1f}% white (needs {WHITE_PERCENTAGE*100:.1f}%)"
-            log_skip(console_msg, log_msg)
+            console_msg = f"!!! SKIP - BACKGROUND TOO DARK !!! White pixels: {white_ratio*100:.1f}%"
+            log_skip(
+                "Background Too Dark",
+                sku,
+                product_name,
+                f"{white_ratio*100:.1f}% white pixels (needs {WHITE_PERCENTAGE*100:.1f}%)"
+            )
+            tqdm.write(f"  {console_msg}")
         
         return is_white
         
     except Exception as e:
         console_msg = f"!!! SKIP - ERROR CHECKING BACKGROUND !!! {e}"
-        log_msg = f"{sku} - {product_name}: Error checking background - {e}"
-        log_skip(console_msg, log_msg)
+        log_skip(
+            "Background Check Error",
+            sku,
+            product_name,
+            str(e)
+        )
+        tqdm.write(f"  {console_msg}")
         return False
 
 
@@ -239,8 +335,13 @@ def scrape_product_details(product):
     html = fetch_page(product['url'])
     if not html:
         console_msg = "!!! SKIP - COULDN'T FETCH PRODUCT PAGE !!!"
-        log_msg = f"UNKNOWN - {product['name']}: Couldn't fetch product page"
-        log_skip(console_msg, log_msg)
+        log_skip(
+            "Page Fetch Error",
+            "UNKNOWN",
+            product['name'],
+            "Failed to fetch product page"
+        )
+        tqdm.write(f"  {console_msg}")
         return None
     
     soup = BeautifulSoup(html, 'html.parser')
@@ -265,8 +366,13 @@ def download_image(product, category_folder):
     
     if not product.get('image_url'):
         console_msg = "!!! SKIP - NO IMAGE URL FOUND !!!"
-        log_msg = f"{sku} - {product_name}: No image URL found"
-        log_skip(console_msg, log_msg)
+        log_skip(
+            "No Image URL",
+            sku,
+            product_name,
+            "No image URL found on product page"
+        )
+        tqdm.write(f"  {console_msg}")
         return False
     
     try:
@@ -300,8 +406,13 @@ def download_image(product, category_folder):
         
     except Exception as e:
         console_msg = f"!!! SKIP - DOWNLOAD ERROR !!! {e}"
-        log_msg = f"{sku} - {product_name}: Download error - {e}"
-        log_skip(console_msg, log_msg)
+        log_skip(
+            "Download Error",
+            sku,
+            product_name,
+            str(e)
+        )
+        tqdm.write(f"  {console_msg}")
         return False
 
 
@@ -314,6 +425,9 @@ def main():
     # Delete existing log file for fresh start
     if os.path.exists(LOG_FILE):
         os.remove(LOG_FILE)
+    
+    # Clear error log
+    error_log.clear()
     
     # Delete existing output directory for fresh start
     if os.path.exists(OUTPUT_DIR):
@@ -358,8 +472,13 @@ def main():
             product_name = product.get('name', original_name) if product else original_name
             sku = product.get('sku', 'UNKNOWN') if product else 'UNKNOWN'
             console_msg = "!!! SKIP - NO SKU FOUND !!!"
-            log_msg = f"{sku} - {product_name}: No SKU found"
-            log_skip(console_msg, log_msg)
+            log_skip(
+                "No SKU Found",
+                sku,
+                product_name,
+                "SKU not found on product page"
+            )
+            tqdm.write(f"  {console_msg}")
             skipped += 1
             continue
         
@@ -373,6 +492,9 @@ def main():
         else:
             skipped += 1
     
+    # Write organized log file
+    write_log_file(len(all_products), successful, skipped)
+    
     # Summary
     total_processed = successful + skipped
     success_rate = (successful / total_processed * 100) if total_processed > 0 else 0
@@ -384,16 +506,10 @@ SCRAPING COMPLETE
 Successfully downloaded: {successful} / {total_processed} ({success_rate:.1f}%)
 Skipped (no white bg/errors): {skipped}
 Images saved to: {OUTPUT_DIR}/
+Error log saved to: {LOG_FILE}
 {'='*60}
 """
     print(summary)
-    
-    # Write summary to log file
-    try:
-        with open(LOG_FILE, 'a', encoding='utf-8') as f:
-            f.write(f"\n{summary}")
-    except Exception as e:
-        print(f"Warning: Couldn't write summary to log: {e}")
 
 
 if __name__ == "__main__":

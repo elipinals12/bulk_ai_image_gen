@@ -8,9 +8,20 @@ Complete workflow for scraping, regenerating, and organizing product images usin
 
 Three-step pipeline to transform white-background product photos into styled lifestyle images:
 
-1. **Scrape & Organize** - Download white-background images sorted by category *(implemented)*
+1. **Scrape & Organize** - Download images from site's native category structure *(implemented)*
 2. **AI Generation** - Generate styled lifestyle images via Gemini API *(implemented)*
 3. **Review & Deploy** - View and select best variants *(planned)*
+
+---
+
+## Key Features
+
+- **Category-Based Scraping**: Extracts and follows site's native 3-level category hierarchy
+- **Global Duplicate Detection**: Tracks products by (SKU, name) to avoid downloading duplicates
+- **Hierarchical Organization**: Maintains Top → Mid → Granular folder structure
+- **White Background Validation**: Perimeter pixel sampling with 85% threshold
+- **Reverse Alpha Blending**: Pixel-perfect watermark removal for AI-generated images
+- **Custom Prompts**: 30 category-specific prompts for realistic lifestyle settings
 
 ---
 
@@ -19,25 +30,19 @@ Three-step pipeline to transform white-background product photos into styled lif
 ### Dependencies
 
 ```bash
-# For scraper (Step 1)
-pip install requests beautifulsoup4 pillow tqdm
-
-# For image generation (Step 2)
-pip install requests pillow numpy tqdm
+pip install requests beautifulsoup4 pillow tqdm numpy
 ```
 
 ### Watermark Removal Setup
 
-Step 2 requires alpha maps for pixel-perfect watermark removal:
-
 1. Download `embedded_assets.hpp` from: https://github.com/allenk/GeminiWatermarkTool
-2. Place in `gemini_watermarks/` folder
+2. Place in project folder
 3. Run: `python extract_alpha_maps.py`
-4. This creates `bg_48.png` and `bg_96.png` in `gemini_watermarks/`
+4. This creates `bg_48.png` and `bg_96.png`
 
 ### Gemini API Key
 
-Get your free API key from: https://aistudio.google.com/apikey
+Get free API key from: https://aistudio.google.com/apikey
 
 Add to `generate_images.py`:
 ```python
@@ -46,99 +51,90 @@ GEMINI_API_KEY = "your-key-here"
 
 ---
 
-## Step 1: Image Scraping (IMPLEMENTED)
+## Step 1: Image Scraping
 
-### What It Does
+### How It Works
 
-Scrapes product listing pages and:
-- Extracts product names from catalog listings
-- Visits individual product pages to retrieve SKU numbers
-- Downloads largest available image (1280x1280)
-- Validates white backgrounds via perimeter pixel sampling
-- Organizes into category folders as: `SKU - Product Name.jpg`
-- Generates organized error log grouped by error type
+1. **Extracts Category Structure** from homepage navigation
+2. **Scrapes Each Category** with pagination support
+3. **Global Deduplication** - First occurrence downloaded, subsequent skipped
+4. **White Background Validation** - 85% white pixel threshold
+5. **Hierarchical Folders** - Top/Mid/Granular structure
 
-### White Background Detection
+### Category Structure (30 Categories)
 
-**Method:** Perimeter pixel sampling
-- Samples every 20 pixels around all 4 edges (top, bottom, left, right)
-- Checks if RGB values ≥ 235 for each sample (catches light grey backgrounds)
-- Image passes if ≥85% of samples meet threshold (allows for edge artifacts/shadows)
-- Non-white images automatically skipped and deleted
+**Bathroom (9 categories)**
+- Bathroom Furniture & Storage
+  - Shower Benches
+  - Shower Organizers & Caddies
+  - Floating Wall Shelves
+  - Storage Bins & Trays
+  - Storage
+- Bath Accessories
+  - Floor Mats
+  - Waste Baskets & Hampers
+  - Towel Racks
+  - Side Tables
 
-### Category System
+**Indoor (11 categories)**
+- Entryway
+  - Entryway Benches
+  - Key Holders
+- Living Room
+  - Coffee Tables
+  - Shelving
+  - Storage
+  - Tissue Boxes & Hangers
+  - Waste Baskets & Hampers
+- Kitchen
+  - Bar & Counter Stools
+  - Countertop Accessories
+  - Dining
+  - Floor Mats
 
-Products matched to exactly one category via keyword priority (first match wins). Categories and keywords defined in `category_prompts.json`:
+**Outdoor (10 categories)**
+- Furniture
+  - Benches
+  - Daybeds
+  - Dining Tables & Chairs
+  - Games
+  - Garden
+  - Lighting
+  - Lounge Chairs, Stools & Ottomans
+  - Parasols
+  - Sofas & Loveseats
+  - Storage Chests
+
+### Folder Structure Output
 
 ```
-shower/   - Shower benches, organizers, caddies
-bench/    - Benches, stools (non-shower)
-chair/    - Chairs, seating
-shelf/    - Wall shelves, floating shelves
-outdoor/  - Patio furniture, loungers, dining sets
-hamper/   - Laundry hampers
-kitchen/  - Cutting boards, knife racks, trivets
-storage/  - Storage bins, boxes, trays
-mat/      - Floor mats, bath mats
-table/    - Coffee/side tables
-cabinet/  - Cabinets, stands, racks
-other/    - Unmatched items
+aquateak_products/
+├── Bathroom/
+│   ├── Bathroom Furniture and Storage/
+│   │   ├── Shower Benches/
+│   │   │   └── [product images]
+│   │   ├── Shower Organizers and Caddies/
+│   │   └── ...
+│   └── Bath Accessories/
+│       ├── Floor Mats/
+│       └── ...
+├── Indoor/
+│   ├── Entryway/
+│   ├── Living Room/
+│   └── Kitchen/
+└── Outdoor/
+    └── Furniture/
+        ├── Benches/
+        └── ...
 ```
 
-### Log File Format
+### Duplicate Detection
 
-Errors grouped by type with comprehensive summary:
+Products appearing in multiple categories are **downloaded once** (first occurrence) and **logged as duplicates** for subsequent appearances.
 
-```
-================================================================================
-PRODUCT IMAGE SCRAPER - ERROR LOG
-================================================================================
-Timestamp: 2024-12-30 15:30:45
-Source: [configured URL]
-================================================================================
-
-================================================================================
-BACKGROUND TOO DARK (28 items)
-================================================================================
-
-SKU: 624
-Product: Shower Shelf
-Details: 78.3% white pixels (needs 85.0%)
---------------------------------------------------------------------------------
-SKU: 531
-Product: Organizer
-Details: 82.1% white pixels (needs 85.0%)
---------------------------------------------------------------------------------
-
-================================================================================
-DOWNLOAD ERROR (4 items)
-================================================================================
-
-SKU: 445
-Product: Bath Mat
-Details: Connection timeout
---------------------------------------------------------------------------------
-
-================================================================================
-SUMMARY
-================================================================================
-
-Total products processed:      147
-Successfully downloaded:       112 (76.2%)
-Skipped (errors):              35 (23.8%)
-
-Error breakdown:
-  Non-white background:        28 (19.0%)
-  Other errors:                7 (4.8%)
-
-Detailed error categories:
-  Background Too Dark: 28 (19.0%)
-  Download Error: 4 (2.7%)
-  No Image URL: 2 (1.4%)
-  No SKU Found: 1 (0.7%)
-
-================================================================================
-```
+**Example:**
+- Floor Mat found in `Bathroom/Bath Accessories/Floor Mats` → Downloaded
+- Same Floor Mat found in `Indoor/Kitchen/Floor Mats` → Skipped, logged as duplicate
 
 ### Usage
 
@@ -147,267 +143,279 @@ python scraper.py
 ```
 
 **Output:**
-- Images saved to `aquateak_products/` (deleted and recreated each run)
-- Error log saved to `scraper_log.txt` (deleted and recreated each run)
-- Console displays progress bars with success/skip indicators
+- Images saved to `aquateak_products/` (recreated fresh each run)
+- Error log saved to `scraper_log.txt`
+- Console shows progress bars with duplicate detection
 
-### Configuration
+### Log File Format
 
-All settings in `scraper.py`:
-- `BASE_URL` - Product listing page URL
-- `TOTAL_PAGES` - Pages to scrape (default: 7)
-- `OUTPUT_DIR` - Save location
-- `WHITE_THRESHOLD` - RGB threshold (default: 235)
-- `WHITE_PERCENTAGE` - Required white pixels (default: 0.85)
-- `SAMPLE_INTERVAL` - Sampling frequency (default: 20px)
-- `REQUEST_DELAY` - Request delay (default: 0.5s)
+```
+================================================================================
+PRODUCT IMAGE SCRAPER - ERROR LOG
+================================================================================
+Timestamp: 2025-01-03 12:00:00
+Source: https://aquateak.com/
+================================================================================
+
+================================================================================
+DUPLICATE PRODUCT (27 items)
+================================================================================
+
+SKU: 1258
+Product: Grate-Mist™ Kitchen Anti-Fatigue Teak Floor Mat
+Details: Already downloaded in: Bathroom/Bath Accessories/Floor Mats
+--------------------------------------------------------------------------------
+...
+
+================================================================================
+SUMMARY
+================================================================================
+
+Total products found:          450
+Unique products (deduplicated):400
+Successfully downloaded:       350 (87.5%)
+Skipped (errors):              50
+Duplicates detected:           50
+
+Error breakdown:
+  Non-white background:        20
+  Duplicate products:          27
+  Other errors:                3
+================================================================================
+```
 
 ---
 
-## Step 2: AI Image Generation (IMPLEMENTED)
+## Step 2: AI Image Generation
 
-### What It Does
+### How It Works
 
-Generates styled lifestyle product images using Gemini Image Generation API:
-1. Reads original white-background images from input folder
-2. For each image:
-   - Combines base prompt + category-specific prompt
-   - Calls Gemini API with original image as reference
-   - Generates N variants (default: 3) with product in styled environment
-   - Removes Gemini watermark using reverse alpha blending
-   - Saves original as v0, variants as v1, v2, v3, etc.
-3. Organizes output into product subfolders by category
+1. **Traverses 3-Level Hierarchy** matching scraper output structure
+   - Loops through `Top/Mid/Granular` folders automatically
+   - Example: `Bathroom/Bathroom Furniture and Storage/Shower Benches/`
+2. **Applies Category-Specific Prompts** by looking up in nested JSON
+   - Finds prompt at: `config["categories"]["Bathroom"]["Bathroom Furniture and Storage"]["Shower Benches"]["prompt"]`
+3. **Generates N Variants** (default: 3) per product via Gemini API
+   - Sends: base_prompt + category_prompt + original image + aspect_ratio + image_size
+4. **Removes Watermarks** using reverse alpha blending
+5. **Saves to Mirrored Structure** preserving the same 3-level hierarchy
+   - Input: `aquateak_products/Bathroom/.../Shower Benches/624 - Product.jpg`
+   - Output: `generated_images/Bathroom/.../Shower Benches/624 - Product/v0...v3.jpg`
 
-### Watermark Removal: Reverse Alpha Blending
+### Prompt System
 
-Gemini adds a semi-transparent sparkle watermark to all API-generated images. This pipeline uses **reverse alpha blending** for pixel-perfect removal:
+**What Gets Sent to Gemini API:**
+1. **Text prompt**: `base_prompt` + category-specific `prompt`
+2. **Reference image**: Original white-background product image (base64 encoded)
+3. **Aspect ratio**: From JSON (default: "1:1")
+4. **Image size**: From JSON, Pro model only (default: "2K" = 2048px)
+5. **Output format**: Always JPEG, saved at 95% quality
 
-**How It Works:**
-- Gemini applies watermark using alpha compositing: `watermarked = α × logo + (1 - α) × original`
-- We reverse the formula to restore original pixels: `original = watermarked / (1 - α)`
-- Alpha maps (`bg_48.png`, `bg_96.png`) contain pre-captured transparency values
-- Mathematical restoration produces zero quality loss (vs. inpainting which "guesses")
-
-**Watermark Specifications:**
-- Location: Bottom-right corner
-- Images ≤1024px (width OR height): 48×48px watermark, 32px margin
-- Images >1024px (width AND height): 96×96px watermark, 64px margin
-
-**Why Reverse Alpha vs. Inpainting:**
-- Pixel-perfect restoration (no blur or artifacts)
-- ~2-5ms processing time (faster than inpainting)
-- Preserves text and sharp edges perfectly
-- Mathematically exact, not AI guessing
-
-### Prompt Structure
-
-Prompts defined in `category_prompts.json`:
-
-**Base Prompt:** Global instructions for all images
+**Base Prompt** (applied to all):
 ```
 "Create a professional lifestyle product photograph showing the item 
 from the provided image in a realistic, styled setting. Photorealistic 
 lighting, sharp focus, high-end aesthetic."
 ```
 
-**Category Prompts:** Context-specific environment details
-- **shower:** Modern luxury bathroom with water droplets, wet tiles, spa lighting
-- **bench:** Entryway/bedroom with throw blanket, natural window light
-- **chair:** Elegant dining/living room, cushion, sophisticated interior
-- **kitchen:** Marble countertop, fresh ingredients, bright lighting
-- **outdoor:** Patio deck, lush greenery, golden hour sunlight
-- **mat:** Overhead angle on bathroom floor with water droplets
-- **table:** Living room with magazines, coffee, large windows
-- **cabinet:** Luxury bathroom wall with organized toiletries
-- **other:** Appropriate upscale setting matching item function
+**Category-Specific Prompts** (examples):
+- **Shower Benches**: "Modern luxury bathroom shower with water droplets, wet tiles, steam effects, spa lighting..."
+- **Coffee Tables**: "Upscale living room with design books, coffee cup, large windows with natural light..."
+- **Outdoor Benches**: "Beautiful patio with lush greenery, warm golden hour sunlight, outdoor living atmosphere..."
 
-**Final Prompt Sent to API:**
-```python
-prompt = base_prompt + " " + categories[category_name]["prompt"]
-```
+**All 30 categories have custom prompts** optimized for their specific use case.
+
+### Watermark Removal
+
+**Reverse Alpha Blending** mathematically restores original pixels:
+- Formula: `original = watermarked / (1 - α)`
+- Alpha maps contain pre-captured transparency values
+- Zero quality loss vs. inpainting (AI guessing)
+- ~2-5ms processing time per image
 
 ### Output Structure
 
+The generator **mirrors the scraper's 3-level folder structure** exactly:
+
 ```
+Input (from scraper):
+aquateak_products/
+├── Bathroom/
+│   └── Bathroom Furniture and Storage/
+│       └── Shower Benches/
+│           └── 624 - Product Name.jpg
+
+Output (from generator):
 generated_images/
-├── shower/
-│   ├── 624 - Product Name Here/
-│   │   ├── v0 624 - Product Name Here.jpg  (original)
-│   │   ├── v1 624 - Product Name Here.jpg  (AI variant 1)
-│   │   ├── v2 624 - Product Name Here.jpg  (AI variant 2)
-│   │   └── v3 624 - Product Name Here.jpg  (AI variant 3)
-│   └── 531 - Another Product/
-│       ├── v0 531 - Another Product.jpg
-│       ├── v1 531 - Another Product.jpg
-│       ├── v2 531 - Another Product.jpg
-│       └── v3 531 - Another Product.jpg
-├── shelf/
-├── outdoor/
-└── [all other categories...]
+├── Bathroom/
+│   └── Bathroom Furniture and Storage/
+│       └── Shower Benches/
+│           └── 624 - Product Name/
+│               ├── v0 624 - Product Name.jpg  (original copy)
+│               ├── v1 624 - Product Name.jpg  (AI variant 1)
+│               ├── v2 624 - Product Name.jpg  (AI variant 2)
+│               └── v3 624 - Product Name.jpg  (AI variant 3)
 ```
 
-**Test mode output:** Creates 3 category folders, each with 1 product subfolder containing v0-v3 (12 total images)
+**How it works:**
+- Generator automatically traverses all 3 folder levels
+- Looks up prompt using: `categories[Top][Mid][Granular]["prompt"]`
+- Creates matching output structure with product subfolders
+- Each product gets v0 (original) + v1-vN (AI variants)
 
 ### Usage
 
-**Test Mode (3 sample images from different categories):**
+**Test Mode** (3 categories, fast):
 ```python
-# In generate_images.py, set:
+# In generate_images.py:
 TEST_MODE = True
 ```
 ```bash
 python generate_images.py
 ```
-- Processes **3 images** (one from each of 3 different categories)
-- Uses **fast model** for cost savings (~$0.04/image)
-- Total cost: **~$0.36** (9 variants)
-- Tests full folder structure and watermark removal
 
-**Full Production Run (all images):**
+**Production Mode** (all images):
 ```python
-# In generate_images.py, set:
+# In generate_images.py:
 TEST_MODE = False
 ```
 ```bash
 python generate_images.py
 ```
-- Processes **all images** in all categories
-- Uses **Pro model** for highest quality (~$0.13/image)
-- Cost depends on number of products (e.g., 100 products × 3 variants = $40)
 
-**Output:**
-- Images saved to `generated_images/` (deleted and recreated each run)
-- Error log saved to `generation_log.txt`
-- Console displays nested progress bars with success/failure indicators
-- Test mode creates output structure with 3 category folders (1 product each)
+### API Costs
 
-### Configuration
+Gemini API charges per image generation:
+- **Test model** (`gemini-2.5-flash-image`): $0.039/image, generates 1024px
+- **Production model** (`gemini-3-pro-image-preview`): $0.134-$0.24/image depending on resolution
 
-All settings in `generate_images.py`:
-- `GEMINI_API_KEY` - Your Gemini API key (required)
-- `GEMINI_MODEL_TEST` - Fast model for testing (default: `gemini-2.5-flash-image`)
-- `GEMINI_MODEL_PRODUCTION` - Pro model for production (default: `gemini-3-pro-image-preview`)
-- `INPUT_FOLDER` - Source images folder (default: `aquateak_products`)
-- `OUTPUT_FOLDER` - Generated images folder (default: `generated_images`)
-- `VARIANTS_PER_IMAGE` - Variants per product (default: 3)
-- `REQUEST_DELAY` - Delay between API calls (default: 1.0s)
-- `TEST_MODE` - Test with 1 image + fast model (default: True)
+Script auto-selects model based on `TEST_MODE`:
+- `TEST_MODE = True` → Flash model (~$0.12 for 3 variants × 1 product)
+- `TEST_MODE = False` → Pro model (~$0.40-$0.72 for 3 variants × 1 product)
 
-**Model auto-selection:**
-- `TEST_MODE = True` → Uses fast model (~$0.04/image, ~$0.12 for 3 variants)
-- `TEST_MODE = False` → Uses Pro model (~$0.13/image, ~$0.40 for 3 variants)
+Example production costs (3 variants each at 2K):
+- 100 products: ~$40
+- 350 products: ~$140
 
-Model comparison:
-- **Fast** (`gemini-2.5-flash-image`) - Quick generations, good quality, cheap
-- **Pro** (`gemini-3-pro-image-preview`) - Best quality, photorealism, text rendering
+**Supported Resolutions (Pro model only):**
+- "1K" → 1024px images ($0.134/image)
+- "2K" → 2048px images ($0.18/image, recommended)
+- "4K" → 4096px images ($0.24/image, for print quality)
+
+**Supported Aspect Ratios (both models):**
+- Square: "1:1"
+- Portrait: "2:3", "3:4", "4:5", "9:16"
+- Landscape: "3:2", "4:3", "5:4", "16:9", "21:9"
+
+Monitor usage: https://aistudio.google.com/
 
 ---
 
 ## Step 3: Review & Deploy (PLANNED)
 
-### Planned Functionality
-
-- Web-based viewer to compare original vs. all variants side-by-side
-- Select/reject individual variants
-- Batch export approved images for website upload
-- Quality control tracking and notes
+- Web-based viewer for side-by-side comparison
+- Select/reject variants
+- Batch export for website upload
 
 ---
 
-## File Structure
+## Configuration
 
+### scraper.py
+
+```python
+BASE_URL = "https://aquateak.com"
+WHITE_THRESHOLD = 235        # RGB threshold for white detection
+WHITE_PERCENTAGE = 0.85      # 85% of perimeter must be white
+REQUEST_DELAY = 0.5          # Seconds between requests
 ```
-project/
-├── scraper.py                    # Step 1: Scrape product images
-├── generate_images.py            # Step 2: Generate AI variants
-├── extract_alpha_maps.py         # Helper: Extract PNG files from C++ header
-├── category_prompts.json         # Category keywords and prompts
-├── scraper_log.txt               # Scraper error log (auto-generated)
-├── generation_log.txt            # Generation error log (auto-generated)
-├── gemini_watermarks/            # Watermark removal assets
-│   ├── embedded_assets.hpp       # Downloaded from GitHub
-│   ├── bg_48.png                 # Extracted alpha map (small watermarks)
-│   └── bg_96.png                 # Extracted alpha map (large watermarks)
-├── aquateak_products/            # Scraped images (auto-generated)
-│   ├── shower/
-│   ├── bench/
-│   ├── chair/
-│   └── [10 more categories]
-└── generated_images/             # AI-generated variants (auto-generated)
-    ├── shower/
-    │   └── [product subfolders with v0-v3 variants]
-    └── [all other categories]
+
+### generate_images.py
+
+**Settings to change:**
+```python
+GEMINI_API_KEY = "your-key-here"  # Required - get from ai.google.dev
+TEST_MODE = True                  # False for production
 ```
+
+**Advanced settings** (usually don't change):
+```python
+GEMINI_MODEL_TEST = "gemini-2.5-flash-image"           # Fast & cheap (~$0.04/image)
+GEMINI_MODEL_PRODUCTION = "gemini-3-pro-image-preview" # Best quality (~$0.13/image)
+REQUEST_DELAY = 1.0
+```
+
+**User settings** (in category_prompts.json):
+```json
+{
+  "variants_per_image": 3,
+  "aspect_ratio": "1:1",
+  "image_size": "2K"
+}
+```
+
+### category_prompts.json
+
+- `variants_per_image`: How many AI variants per product (3 recommended)
+- `aspect_ratio`: Image dimensions - "1:1" (square), "16:9" (wide), "9:16" (tall), etc.
+- `image_size`: Resolution for Pro model - "1K", "2K", or "4K" (only applies to production mode)
+- `base_prompt`: Global instructions applied to all images
+- `categories`: Nested structure with category-specific prompts
+
+**Note:** `image_size` only works with Pro model (production mode). Test mode (Flash model) always generates 1024px images.
 
 ---
 
-## Workflow Summary
-
-### Quick Start
+## Workflow
 
 ```bash
-# 1. Scrape product images
-python scraper.py
+# 1. Scrape all products
+python3 scraper.py
 
-# 2. Extract watermark alpha maps (one-time setup)
-python extract_alpha_maps.py
+# 2. Extract alpha maps (one-time setup)
+python3 extract_alpha_maps.py
 
-# 3. Test AI generation (3 sample images, fast model, ~$0.36)
-# TEST_MODE = True in generate_images.py
-python generate_images.py
+# 3. Test generation (3 images, already in test mode)
+# Add API key to generate_images.py
+python3 generate_images.py
 
-# 4. Run full generation (all images, Pro model, ~$40 for 100 products)
+# 4. Full production run
 # Set TEST_MODE = False in generate_images.py
-python generate_images.py
+python3 generate_images.py
 ```
-
-### Full Pipeline
-
-1. **Configure categories** in `category_prompts.json`
-2. **Configure scraper** with product catalog URL in `scraper.py`
-3. **Run scraper** → Downloads white-background images
-4. **Review scraper log** → Check what was skipped and why
-5. **Extract alpha maps** → One-time setup for watermark removal
-6. **Test generation** → Verify API key, prompts, and watermark removal (3 sample images)
-7. **Review test outputs** → Check quality and folder structure
-8. **Run full generation** → Process all images with Pro model
-9. **Review generation log** → Check for API failures
-10. **Review all outputs** → Compare variants and select best
 
 ---
 
 ## Technical Details
 
+### Output Format
+- All generated images saved as **JPEG** at 95% quality
+- Input images can be JPG or PNG (converted during processing)
+- Watermark removed variants maintain original quality
+
+### White Background Detection
+
+- **Method**: Perimeter pixel sampling
+- **Samples**: Every 20px along all 4 edges
+- **Threshold**: RGB ≥ 235 (catches light grey)
+- **Pass Rate**: 85% of samples must be white
+
+### Duplicate Detection
+
+- **Tracking**: Global dictionary with (SKU, name) keys
+- **Logic**: First occurrence → download, subsequent → skip & log
+- **Benefit**: No duplicate images, clear duplicate report
+
 ### Filename Sanitization
+
 - Inch symbol `"` → ` inch`
-- Special characters (`/`, `\`, `:`, `*`, `?`, `<`, `>`, `|`) removed or replaced
-- Trademark symbols (™, ®) stripped
-- Multiple spaces collapsed to single space
+- Special chars (`/`, `\`, `:`, etc.) → removed
+- Trademark symbols → stripped
+- Folder names: `&` → `and`
 
-### Image Requirements
-- Source images must have white/light backgrounds (≥85% white perimeter)
-- RGB threshold: 235 (catches light grey)
-- Original images preserved as v0 in output
+### Pagination Support
 
-### Rate Limiting
-- Scraper: 0.5s delay between requests
-- Generator: 1.0s delay between API calls (configurable)
-- Adjust `REQUEST_DELAY` if hitting rate limits
-
-### API Costs
-Gemini API charges per image generation:
-- **Fast model:** ~$0.04/image
-- **Pro model:** ~$0.13/image (1K-2K resolution)
-
-The script auto-selects model based on TEST_MODE:
-- Test mode uses fast model (~$0.12 for 3 variants of 1 image)
-- Production mode uses Pro model (~$0.40 per product × number of products)
-
-Example cost for 100 products with 3 variants each:
-- Fast: ~$12
-- Pro: ~$40
-
-Monitor usage at: https://aistudio.google.com/
+Automatically detects and scrapes all pages for each category until no "next page" button found.
 
 ---
 
@@ -415,62 +423,38 @@ Monitor usage at: https://aistudio.google.com/
 
 **Scraper Issues:**
 - Check `scraper_log.txt` for organized error breakdown
-- "Background Too Dark" errors show exact white pixel percentage
-- Adjust `WHITE_THRESHOLD` or `WHITE_PERCENTAGE` if too many false rejections
+- "Background Too Dark" shows exact white pixel percentage
+- Adjust `WHITE_THRESHOLD` or `WHITE_PERCENTAGE` if needed
 
 **Generation Issues:**
 - Check `generation_log.txt` for API errors
-- Verify API key is set correctly
-- Ensure alpha maps exist in `gemini_watermarks/`
-- Use TEST_MODE (3 images, fast model, ~$0.36) to debug before full run
-- Check API quota at https://aistudio.google.com/
+- Verify API key is set in `generate_images.py`
+- Ensure alpha maps exist in `gemini_watermarks/` folder
+- Use TEST_MODE to debug before full run
+- If "prompt not found" errors, verify folder names match JSON keys exactly
 
-**Watermark Removal Issues:**
-- Ensure `bg_48.png` and `bg_96.png` exist in `gemini_watermarks/`
-- Run `extract_alpha_maps.py` if files are missing
-- Script auto-detects correct watermark size based on image dimensions
+**Folder Structure Mismatch:**
+- Generator expects same 3-level structure as scraper creates
+- Folder names must match (case-sensitive)
+- Check that `aquateak_products/` has Top/Mid/Granular structure
+- Verify JSON category keys match folder names (e.g., "Bathroom Furniture and Storage")
 
----
-
-## Configuration Files
-
-### category_prompts.json
-
-```json
-{
-  "base_prompt": "Global prompt for all images...",
-  "categories": {
-    "shower": {
-      "keywords": ["shower"],
-      "prompt": "Category-specific environment description..."
-    },
-    ...
-  },
-  "generation_settings": {
-    "attempts_per_image": 3,
-    "model": "gemini",
-    "aspect_ratio": "1:1",
-    "output_mime_type": "image/jpeg"
-  }
-}
-```
-
-**Structure:**
-- `base_prompt` - Applied to all images
-- `categories[name].keywords` - Matching keywords for categorization
-- `categories[name].prompt` - Category-specific environment details
-- `generation_settings.aspect_ratio` - Image aspect ratio (1:1, 16:9, etc.)
-- `generation_settings.output_mime_type` - Output format
+**Category Structure:**
+- If site navigation changes, scraper auto-extracts new structure
+- Update prompts in `category_prompts.json` if new categories appear
 
 ---
 
 ## Notes
 
-- All folders recreated fresh on each run (no incremental updates)
-- SKU numbers are unique product identifiers
-- Categories are mutually exclusive (first keyword match wins)
-- Only the main product image is downloaded (lifestyle shots skipped)
-- Gemini watermark is mandatory on free/Pro API tier (cannot be disabled)
-- Images stored at maximum available resolution (typically 1280x1280)
-- Customize categories, keywords, and prompts in `category_prompts.json` for your product line
-- Configure source URL in `scraper.py` `BASE_URL` variable
+- All folders recreated fresh each run (no incremental updates)
+- Global deduplication prevents duplicate downloads
+- 30 custom prompts for realistic lifestyle settings
+- Hierarchical organization matches site structure
+- Watermark removal is pixel-perfect (no quality loss)
+- Images stored at 1280x1280 from scraper (max available)
+- Generated images: 1024px (test) or 2K (production) depending on mode
+- **Model names verified** as of Jan 2026:
+  - `gemini-2.5-flash-image` (stable, production-ready)
+  - `gemini-3-pro-image-preview` (preview, best quality available)
+- Output always saved as JPEG regardless of input format

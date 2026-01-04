@@ -1,7 +1,7 @@
 """
-Product Image Scraper
-Scrapes product images with white backgrounds, organizes by category, 
-and prepares for AI image generation workflow.
+Product Image Scraper - Category-Based with Global Deduplication
+Scrapes products from site's native category structure, detects duplicates globally,
+and organizes into hierarchical folders matching the site's organization.
 """
 
 import os
@@ -22,48 +22,33 @@ from collections import defaultdict
 # Configuration
 # ============================================================================
 
-# Base URL for product listings
-BASE_URL = "https://aquateak.com/all-1/"
-TOTAL_PAGES = 7
+BASE_URL = "https://aquateak.com"
+HOMEPAGE_URL = "https://aquateak.com/"
 
-# Output directory for downloaded images
 OUTPUT_DIR = "aquateak_products"
-
-# Log file for errors and skipped products
 LOG_FILE = "scraper_log.txt"
-
-# Category configuration file
 CATEGORY_CONFIG = "category_prompts.json"
 
-# White background detection settings
-WHITE_THRESHOLD = 235  # RGB value threshold (0-255) - lowered to catch light grey backgrounds
-WHITE_PERCENTAGE = 0.85  # 85% of sampled pixels must be white (allows for edge artifacts)
-SAMPLE_INTERVAL = 20  # Sample every N pixels along perimeter
+# White background detection
+WHITE_THRESHOLD = 235
+WHITE_PERCENTAGE = 0.85
+SAMPLE_INTERVAL = 20
 
-# Request delay to avoid rate limiting (seconds)
 REQUEST_DELAY = 0.5
 
 # ============================================================================
-# Global error tracking
+# Global Tracking
 # ============================================================================
 
-# Dictionary to collect errors by category
 error_log = defaultdict(list)
+downloaded_products = {}  # Key: (sku, product_name), Value: category_path
 
 # ============================================================================
 # Helper Functions
 # ============================================================================
 
 def log_skip(error_category, sku, product_name, details):
-    """
-    Add error to categorized log (will be written at end).
-    
-    Args:
-        error_category: Category of error (e.g., "Background Too Dark", "Download Error")
-        sku: Product SKU
-        product_name: Product name
-        details: Additional details about the error
-    """
+    """Add error to categorized log."""
     error_log[error_category].append({
         'sku': sku,
         'name': product_name,
@@ -71,71 +56,53 @@ def log_skip(error_category, sku, product_name, details):
     })
 
 
-def write_log_file(total_products, successful, skipped):
-    """
-    Write organized log file with all errors grouped by category.
-    Includes header with title, timestamp, and comprehensive summary.
-    
-    Args:
-        total_products: Total number of products attempted
-        successful: Number of successfully downloaded images
-        skipped: Number of skipped images
-    """
+def write_log_file(total_products, successful, skipped, duplicates):
+    """Write organized log file with all errors grouped by category."""
     try:
         with open(LOG_FILE, 'w', encoding='utf-8') as f:
-            # Header
             f.write("="*80 + "\n")
             f.write("PRODUCT IMAGE SCRAPER - ERROR LOG\n")
             f.write("="*80 + "\n")
             f.write(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"Source: {BASE_URL}\n")
+            f.write(f"Source: {HOMEPAGE_URL}\n")
             f.write("="*80 + "\n\n")
             
-            # Write each error category
             for category, errors in sorted(error_log.items()):
                 f.write(f"\n{'='*80}\n")
                 f.write(f"{category.upper()} ({len(errors)} items)\n")
                 f.write(f"{'='*80}\n\n")
                 
                 for error in errors:
-                    sku = error['sku']
-                    name = error['name']
-                    details = error['details']
-                    
-                    f.write(f"SKU: {sku}\n")
-                    f.write(f"Product: {name}\n")
-                    f.write(f"Details: {details}\n")
+                    f.write(f"SKU: {error['sku']}\n")
+                    f.write(f"Product: {error['name']}\n")
+                    f.write(f"Details: {error['details']}\n")
                     f.write("-" * 80 + "\n")
             
-            # Comprehensive summary at end
             total_errors = sum(len(errors) for errors in error_log.values())
-            success_rate = (successful / total_products * 100) if total_products > 0 else 0
-            error_rate = (total_errors / total_products * 100) if total_products > 0 else 0
+            total_attempted = successful + skipped
+            success_rate = (successful / total_attempted * 100) if total_attempted > 0 else 0
             
-            # Get specific error counts
             bg_dark_count = len(error_log.get("Background Too Dark", []))
-            other_errors_count = total_errors - bg_dark_count
+            duplicate_count = len(error_log.get("Duplicate Product", []))
+            other_errors = total_errors - bg_dark_count - duplicate_count
             
             f.write(f"\n{'='*80}\n")
             f.write(f"SUMMARY\n")
             f.write(f"{'='*80}\n\n")
-            
-            # Overall statistics
-            f.write(f"Total products processed:      {total_products}\n")
+            f.write(f"Total products found:          {total_products}\n")
+            f.write(f"Unique products (deduplicated):{total_attempted}\n")
             f.write(f"Successfully downloaded:       {successful} ({success_rate:.1f}%)\n")
-            f.write(f"Skipped (errors):              {skipped} ({error_rate:.1f}%)\n\n")
-            
-            # Breakdown by error type
+            f.write(f"Skipped (errors):              {skipped}\n")
+            f.write(f"Duplicates detected:           {duplicates}\n\n")
             f.write(f"Error breakdown:\n")
-            f.write(f"  Non-white background:        {bg_dark_count} ({bg_dark_count/total_products*100 if total_products > 0 else 0:.1f}%)\n")
-            f.write(f"  Other errors:                {other_errors_count} ({other_errors_count/total_products*100 if total_products > 0 else 0:.1f}%)\n\n")
+            f.write(f"  Non-white background:        {bg_dark_count}\n")
+            f.write(f"  Duplicate products:          {duplicate_count}\n")
+            f.write(f"  Other errors:                {other_errors}\n\n")
             
-            # Detailed error categories
             if error_log:
                 f.write(f"Detailed error categories:\n")
                 for category, errors in sorted(error_log.items()):
-                    pct = (len(errors) / total_products * 100) if total_products > 0 else 0
-                    f.write(f"  {category}: {len(errors)} ({pct:.1f}%)\n")
+                    f.write(f"  {category}: {len(errors)}\n")
             
             f.write("\n" + "="*80 + "\n")
             
@@ -143,370 +110,389 @@ def write_log_file(total_products, successful, skipped):
         print(f"Warning: Couldn't write log file: {e}")
 
 
-def load_categories():
-    """Load category configuration from JSON file"""
-    try:
-        with open(CATEGORY_CONFIG, 'r') as f:
-            config = json.load(f)
-            return config['categories']
-    except Exception as e:
-        print(f"Error loading categories from {CATEGORY_CONFIG}: {e}")
-        print("Using fallback category configuration")
-        return {
-            'other': {'keywords': [], 'prompt': 'Default setting'}
-        }
-
-
 def sanitize_filename(name):
-    """Remove or replace characters that are invalid in filenames"""
-    # Replace inch symbol and other problematic characters
+    """Sanitize filename by removing invalid characters."""
     name = name.replace('"', ' inch')
-    name = name.replace('/', '-')
-    name = name.replace('\\', '-')
-    name = name.replace(':', '-')
-    name = name.replace('*', '')
-    name = name.replace('?', '')
-    name = name.replace('<', '')
-    name = name.replace('>', '')
-    name = name.replace('|', '')
-    name = name.replace('â„¢', '')
-    name = name.replace('Â®', '')
-    
-    # Remove extra whitespace
-    name = re.sub(r'\s+', ' ', name).strip()
-    
-    return name
+    for char in ['/', '\\', ':', '*', '?', '<', '>', '|']:
+        name = name.replace(char, '-' if char in ['/', '\\'] else '')
+    name = name.replace('™', '').replace('®', '')
+    return re.sub(r'\s+', ' ', name).strip()
 
 
-def get_category(product_name, categories):
-    """Match product name to category based on keywords (first match wins)"""
-    product_lower = product_name.lower()
-    
-    for category_name, category_data in categories.items():
-        for keyword in category_data['keywords']:
-            if keyword in product_lower:
-                return category_name
-    
-    return 'other'  # Fallback
+def sanitize_folder_name(name):
+    """Sanitize folder name (similar to filename but keep ampersands as 'and')."""
+    name = name.replace('&', 'and')
+    name = name.replace('"', ' inch')
+    for char in ['/', '\\', ':', '*', '?', '<', '>', '|']:
+        name = name.replace(char, '')
+    name = name.replace('™', '').replace('®', '')
+    return re.sub(r'\s+', ' ', name).strip()
 
 
 def is_white_background(image_path, product_name, sku):
-    """Check if image has white background by sampling perimeter pixels"""
+    """Check if image has white background by sampling perimeter pixels."""
     try:
         img = Image.open(image_path).convert('RGB')
         width, height = img.size
         
         samples = []
-        
-        # Sample top edge
         for x in range(0, width, SAMPLE_INTERVAL):
             samples.append(img.getpixel((x, 0)))
-        
-        # Sample bottom edge
-        for x in range(0, width, SAMPLE_INTERVAL):
             samples.append(img.getpixel((x, height - 1)))
-        
-        # Sample left edge
         for y in range(0, height, SAMPLE_INTERVAL):
             samples.append(img.getpixel((0, y)))
-        
-        # Sample right edge
-        for y in range(0, height, SAMPLE_INTERVAL):
             samples.append(img.getpixel((width - 1, y)))
         
-        # Count how many samples are white enough
-        white_count = sum(
-            1 for r, g, b in samples 
-            if r >= WHITE_THRESHOLD and g >= WHITE_THRESHOLD and b >= WHITE_THRESHOLD
-        )
+        white_count = sum(1 for r, g, b in samples 
+                         if r >= WHITE_THRESHOLD and g >= WHITE_THRESHOLD and b >= WHITE_THRESHOLD)
         
         white_ratio = white_count / len(samples)
         is_white = white_ratio >= WHITE_PERCENTAGE
         
         if not is_white:
-            console_msg = f"!!! SKIP - BACKGROUND TOO DARK !!! White pixels: {white_ratio*100:.1f}%"
-            log_skip(
-                "Background Too Dark",
-                sku,
-                product_name,
-                f"{white_ratio*100:.1f}% white pixels (needs {WHITE_PERCENTAGE*100:.1f}%)"
-            )
-            tqdm.write(f"  {console_msg}")
+            log_skip("Background Too Dark", sku, product_name,
+                    f"{white_ratio*100:.1f}% white pixels (needs {WHITE_PERCENTAGE*100:.1f}%)")
+            tqdm.write(f"  ⚠ SKIP - Background too dark ({white_ratio*100:.1f}%)")
         
         return is_white
         
     except Exception as e:
-        console_msg = f"!!! SKIP - ERROR CHECKING BACKGROUND !!! {e}"
-        log_skip(
-            "Background Check Error",
-            sku,
-            product_name,
-            str(e)
-        )
-        tqdm.write(f"  {console_msg}")
+        log_skip("Background Check Error", sku, product_name, str(e))
+        tqdm.write(f"  ⚠ SKIP - Error checking background: {e}")
         return False
 
 
+def extract_category_structure():
+    """Extract full category hierarchy from homepage navigation."""
+    try:
+        response = requests.get(HOMEPAGE_URL, timeout=10)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        structure = {}
+        
+        nav = soup.find('nav')
+        if not nav:
+            nav = soup.find(attrs={'role': 'navigation'})
+        
+        if not nav:
+            return {}
+        
+        top_level_items = nav.find_all('li', recursive=False) or nav.find('ul').find_all('li', recursive=False)
+        
+        for nav_item in top_level_items:
+            links = nav_item.find_all('a', recursive=False)
+            if not links:
+                continue
+            
+            top_link = links[0]
+            top_name = top_link.get_text(strip=True)
+            
+            # Only process Bathroom, Indoor, Outdoor
+            if top_name not in ['Bathroom', 'Indoor', 'Outdoor']:
+                continue
+            
+            structure[top_name] = {}
+            dropdown_uls = nav_item.find_all('ul')
+            
+            if not dropdown_uls:
+                continue
+            
+            for dropdown_ul in dropdown_uls:
+                section_items = dropdown_ul.find_all('li', recursive=False)
+                
+                for section_item in section_items:
+                    section_links = section_item.find_all('a')
+                    if not section_links:
+                        continue
+                    
+                    section_name = section_links[0].get_text(strip=True)
+                    
+                    if 'Collection' in section_name or 'Shop All' in section_name:
+                        continue
+                    
+                    sub_ul = section_item.find('ul')
+                    if not sub_ul:
+                        continue
+                    
+                    structure[top_name][section_name] = {}
+                    granular_items = sub_ul.find_all('li')
+                    
+                    for granular_item in granular_items:
+                        granular_link = granular_item.find('a')
+                        if not granular_link:
+                            continue
+                        
+                        granular_name = granular_link.get_text(strip=True)
+                        granular_url = granular_link.get('href', '')
+                        
+                        if 'Shop All' in granular_name:
+                            continue
+                        
+                        if granular_url and not granular_url.startswith('http'):
+                            granular_url = BASE_URL + granular_url
+                        
+                        if granular_url:
+                            structure[top_name][section_name][granular_name] = granular_url
+        
+        return structure
+        
+    except Exception as e:
+        print(f"Error extracting category structure: {e}")
+        import traceback
+        traceback.print_exc()
+        return {}
+
+
 def get_largest_image_url(soup):
-    """Extract the largest available product image URL from product page"""
-    # Try multiple selectors to handle different page structures
-    
-    # Method 1: Main product image
+    """Extract largest available product image URL."""
     img_tag = soup.select_one('.productView-image img')
     if img_tag:
         src = img_tag.get('src', '') or img_tag.get('data-src', '')
         if src:
             return re.sub(r'/\d+x\d+/', '/1280x1280/', src)
     
-    # Method 2: Look for data-zoom-image attribute (for zoomable images)
     zoom_img = soup.select_one('[data-zoom-image]')
     if zoom_img:
-        src = zoom_img.get('data-zoom-image', '')
-        if src:
-            return src
-    
-    # Method 3: Look for data-image or data-src attributes
-    data_img = soup.select_one('[data-image], [data-src]')
-    if data_img:
-        src = data_img.get('data-image', '') or data_img.get('data-src', '')
-        if src:
-            return re.sub(r'/\d+x\d+/', '/1280x1280/', src)
-    
-    # Method 4: First image in product gallery
-    gallery_img = soup.select_one('.productView-images img, .product-image img')
-    if gallery_img:
-        src = gallery_img.get('src', '') or gallery_img.get('data-src', '')
-        if src:
-            return re.sub(r'/\d+x\d+/', '/1280x1280/', src)
+        return zoom_img.get('data-zoom-image', '')
     
     return None
 
 
-def fetch_page(url):
-    """Fetch HTML content from URL with error handling"""
+def scrape_category_page(category_url, page=1):
+    """Scrape single category page for product names and URLs."""
     try:
+        url = f"{category_url}?page={page}" if page > 1 else category_url
         response = requests.get(url, timeout=10)
         response.raise_for_status()
-        return response.text
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        products = []
+        product_cards = soup.select('.product')
+        
+        for card in product_cards:
+            name_tag = card.select_one('.card-title a')
+            if not name_tag:
+                continue
+            
+            product_name = name_tag.get_text(strip=True)
+            product_url = name_tag['href']
+            
+            if not product_url.startswith('http'):
+                product_url = BASE_URL + product_url
+            
+            products.append({'name': product_name, 'url': product_url})
+        
+        # Check for pagination
+        has_next_page = soup.select_one('.pagination-item--next:not(.pagination-item--disabled)')
+        
+        return products, has_next_page is not None
+        
     except Exception as e:
-        print(f"Error fetching {url}: {e}")
-        return None
-
-
-def scrape_listing_page(page_num):
-    """Scrape single listing page for product names and URLs"""
-    url = f"{BASE_URL}?page={page_num}"
-    
-    html = fetch_page(url)
-    if not html:
-        return []
-    
-    soup = BeautifulSoup(html, 'html.parser')
-    products = []
-    
-    # Find all product cards
-    product_cards = soup.select('.product')
-    
-    for card in product_cards:
-        # Get product name from heading
-        name_tag = card.select_one('.card-title a')
-        if not name_tag:
-            continue
-        
-        product_name = name_tag.get_text(strip=True)
-        product_url = name_tag['href']
-        
-        # Make URL absolute
-        if not product_url.startswith('http'):
-            product_url = f"https://aquateak.com{product_url}"
-        
-        products.append({
-            'name': product_name,
-            'url': product_url
-        })
-    
-    return products
+        print(f"Error scraping category page {category_url}: {e}")
+        return [], False
 
 
 def scrape_product_details(product):
-    """Visit individual product page to get SKU and image URL"""
+    """Visit product page to get SKU and image URL."""
     time.sleep(REQUEST_DELAY)
     
-    html = fetch_page(product['url'])
-    if not html:
-        console_msg = "!!! SKIP - COULDN'T FETCH PRODUCT PAGE !!!"
-        log_skip(
-            "Page Fetch Error",
-            "UNKNOWN",
-            product['name'],
-            "Failed to fetch product page"
-        )
-        tqdm.write(f"  {console_msg}")
+    try:
+        response = requests.get(product['url'], timeout=10)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        sku_element = soup.find('dt', string='SKU:')
+        if sku_element:
+            sku_dd = sku_element.find_next_sibling('dd')
+            if sku_dd:
+                product['sku'] = sku_dd.get_text(strip=True)
+        
+        product['image_url'] = get_largest_image_url(soup)
+        
+        return product
+        
+    except Exception as e:
+        log_skip("Page Fetch Error", "UNKNOWN", product['name'], f"Failed to fetch: {e}")
         return None
-    
-    soup = BeautifulSoup(html, 'html.parser')
-    
-    # Extract SKU
-    sku_element = soup.find('dt', string='SKU:')
-    if sku_element:
-        sku_dd = sku_element.find_next_sibling('dd')
-        if sku_dd:
-            product['sku'] = sku_dd.get_text(strip=True)
-    
-    # Get largest image URL
-    product['image_url'] = get_largest_image_url(soup)
-    
-    return product
 
 
-def download_image(product, category_folder):
-    """Download product image and save with proper filename"""
+def download_image(product, category_folder, category_path):
+    """Download product image if not duplicate."""
     sku = product.get('sku', 'UNKNOWN')
     product_name = product['name']
     
+    # Check for duplicate
+    product_key = (sku, product_name)
+    if product_key in downloaded_products:
+        log_skip("Duplicate Product", sku, product_name,
+                f"Already downloaded in: {downloaded_products[product_key]}")
+        tqdm.write(f"  ⚠ SKIP - {sku} - {product_name} - Duplicate (found in {downloaded_products[product_key]})")
+        return False
+    
     if not product.get('image_url'):
-        console_msg = "!!! SKIP - NO IMAGE URL FOUND !!!"
-        log_skip(
-            "No Image URL",
-            sku,
-            product_name,
-            "No image URL found on product page"
-        )
-        tqdm.write(f"  {console_msg}")
+        log_skip("No Image URL", sku, product_name, "No image URL found")
+        tqdm.write(f"  ⚠ SKIP - {sku} - {product_name} - No image URL")
         return False
     
     try:
-        # Download image
         response = requests.get(product['image_url'], timeout=15)
         response.raise_for_status()
         
-        # Get file extension
         ext = '.jpg'
         if 'png' in product['image_url'].lower():
             ext = '.png'
         
-        # Create sanitized filename
         safe_name = sanitize_filename(product_name)
         filename = f"{sku} - {safe_name}{ext}"
-        
-        # Save temporarily to check background
         temp_path = os.path.join(category_folder, filename)
         
         with open(temp_path, 'wb') as f:
             f.write(response.content)
         
-        # Check for white background
         if not is_white_background(temp_path, product_name, sku):
             os.remove(temp_path)
             return False
         
-        # Success - use tqdm.write to not disrupt progress bar
+        downloaded_products[product_key] = category_path
+        
         tqdm.write(f"  ✓ {sku} - {safe_name}")
         return True
         
     except Exception as e:
-        console_msg = f"!!! SKIP - DOWNLOAD ERROR !!! {e}"
-        log_skip(
-            "Download Error",
-            sku,
-            product_name,
-            str(e)
-        )
-        tqdm.write(f"  {console_msg}")
+        log_skip("Download Error", sku, product_name, str(e))
+        tqdm.write(f"  ⚠ SKIP - {sku} - {product_name} - Download error: {e}")
         return False
 
 
 def main():
-    """Main scraper workflow"""
+    """Main scraper workflow."""
     print("="*60)
-    print("Product Image Scraper")
+    print("Product Image Scraper - Category-Based")
     print("="*60)
     
-    # Delete existing log file for fresh start
     if os.path.exists(LOG_FILE):
         os.remove(LOG_FILE)
     
-    # Clear error log
     error_log.clear()
+    downloaded_products.clear()
     
-    # Delete existing output directory for fresh start
     if os.path.exists(OUTPUT_DIR):
         print(f"\nDeleting existing folder: {OUTPUT_DIR}/")
         shutil.rmtree(OUTPUT_DIR)
     
-    # Load categories from JSON
-    categories = load_categories()
-    
-    # Create output directory
     Path(OUTPUT_DIR).mkdir(exist_ok=True)
     
-    # Create category folders
-    for category_name in categories.keys():
-        Path(os.path.join(OUTPUT_DIR, category_name)).mkdir(exist_ok=True)
+    # Extract category structure from site
+    print("\nExtracting category structure from site...")
+    structure = extract_category_structure()
     
-    print(f"Created fresh folder structure in {OUTPUT_DIR}/\n")
+    if not structure:
+        print("✗ ERROR: Could not extract category structure")
+        return
     
-    # Scrape all listing pages
-    all_products = []
-    print("\nScraping listing pages...")
-    for page in tqdm(range(1, TOTAL_PAGES + 1), desc="Pages", unit="page"):
-        products = scrape_listing_page(page)
-        all_products.extend(products)
-        time.sleep(REQUEST_DELAY)
+    total_categories = sum(len(list(granular.keys())) for top in structure.values() 
+                          for mid in top.values() for granular in [mid] if isinstance(mid, dict))
+    print(f"✓ Found {total_categories} granular categories\n")
     
-    print(f"\n{'='*60}")
-    print(f"Total products found: {len(all_products)}")
-    print(f"{'='*60}\n")
+    # Create folder structure
+    for top_name, mid_level in structure.items():
+        for mid_name, granular_level in mid_level.items():
+            for granular_name in granular_level.keys():
+                folder_path = os.path.join(
+                    OUTPUT_DIR,
+                    sanitize_folder_name(top_name),
+                    sanitize_folder_name(mid_name),
+                    sanitize_folder_name(granular_name)
+                )
+                Path(folder_path).mkdir(parents=True, exist_ok=True)
     
-    # Process each product
+    print(f"Created folder structure in {OUTPUT_DIR}/\n")
+    
+    # Count total products first
+    print("Counting total products...")
+    total_products_to_scrape = 0
+    for top_name, mid_level in structure.items():
+        for mid_name, granular_level in mid_level.items():
+            for granular_name, category_url in granular_level.items():
+                page = 1
+                while True:
+                    products, has_next = scrape_category_page(category_url, page)
+                    if not products:
+                        break
+                    total_products_to_scrape += len(products)
+                    if not has_next:
+                        break
+                    page += 1
+    
+    print(f"✓ Found {total_products_to_scrape} total products to process\n")
+    
+    # Now scrape with single progress bar
     successful = 0
     skipped = 0
     
-    print(f"Processing {len(all_products)} products...")
-    for product in tqdm(all_products, desc="Products", unit="product"):
-        original_name = product['name']
-        
-        # Get SKU and image URL from product page
-        product = scrape_product_details(product)
-        if not product or not product.get('sku'):
-            product_name = product.get('name', original_name) if product else original_name
-            sku = product.get('sku', 'UNKNOWN') if product else 'UNKNOWN'
-            console_msg = "!!! SKIP - NO SKU FOUND !!!"
-            log_skip(
-                "No SKU Found",
-                sku,
-                product_name,
-                "SKU not found on product page"
-            )
-            tqdm.write(f"  {console_msg}")
-            skipped += 1
-            continue
-        
-        # Determine category
-        category = get_category(product['name'], categories)
-        category_folder = os.path.join(OUTPUT_DIR, category)
-        
-        # Download and check image
-        if download_image(product, category_folder):
-            successful += 1
-        else:
-            skipped += 1
+    with tqdm(total=total_products_to_scrape, desc="Processing products", unit="product") as pbar:
+        for top_name, mid_level in structure.items():
+            pbar.write(f"\n{'='*60}")
+            pbar.write(f"Processing: {top_name}")
+            pbar.write(f"{'='*60}")
+            
+            for mid_name, granular_level in mid_level.items():
+                for granular_name, category_url in granular_level.items():
+                    category_path = f"{top_name}/{mid_name}/{granular_name}"
+                    folder_path = os.path.join(
+                        OUTPUT_DIR,
+                        sanitize_folder_name(top_name),
+                        sanitize_folder_name(mid_name),
+                        sanitize_folder_name(granular_name)
+                    )
+                    
+                    # Scrape all pages for this category
+                    page = 1
+                    while True:
+                        products, has_next = scrape_category_page(category_url, page)
+                        
+                        if not products:
+                            break
+                        
+                        for product in products:
+                            product = scrape_product_details(product)
+                            
+                            if not product or not product.get('sku'):
+                                skipped += 1
+                                pbar.update(1)
+                                continue
+                            
+                            if download_image(product, folder_path, category_path):
+                                successful += 1
+                            else:
+                                skipped += 1
+                            
+                            pbar.update(1)
+                        
+                        if not has_next:
+                            break
+                        
+                        page += 1
+                        time.sleep(REQUEST_DELAY)
     
-    # Write organized log file
-    write_log_file(len(all_products), successful, skipped)
+    duplicates = len(error_log.get("Duplicate Product", []))
     
-    # Summary
-    total_processed = successful + skipped
-    success_rate = (successful / total_processed * 100) if total_processed > 0 else 0
+    write_log_file(total_products_to_scrape, successful, skipped, duplicates)
+    
+    success_rate = (successful / (successful + skipped) * 100) if (successful + skipped) > 0 else 0
     
     summary = f"""
 {'='*60}
 SCRAPING COMPLETE
 {'='*60}
-Successfully downloaded: {successful} / {total_processed} ({success_rate:.1f}%)
-Skipped (no white bg/errors): {skipped}
-Images saved to: {OUTPUT_DIR}/
-Error log saved to: {LOG_FILE}
+Total products found:          {total_products_to_scrape}
+Unique products (deduplicated):{successful + skipped}
+Successfully downloaded:       {successful} ({success_rate:.1f}%)
+Skipped (errors):              {skipped}
+Duplicates detected:           {duplicates}
+Images saved to:               {OUTPUT_DIR}/
+Error log:                     {LOG_FILE}
 {'='*60}
 """
     print(summary)

@@ -1,62 +1,118 @@
 {
-  "base_prompt": "Create a professional lifestyle product photograph showing the item from the provided image in a realistic, styled setting. Photorealistic lighting, sharp focus, high-end aesthetic.",
+  "variants_per_image": 3,
+  "aspect_ratio": "1:1",
+  "image_size": "4K",
+  
+  "base_prompt": "Create a professional lifestyle product photograph showing the item from the provided image in a realistic, styled setting. Use bright photorealistic lighting, sharp focus, high-end aesthetic. Keep the logo on the item EXACTLY the same.",
   
   "categories": {
-    "shower": {
-      "keywords": ["shower"],
-      "prompt": "Modern luxury bathroom shower with water droplets on the teak, wet tiles, subtle steam, and high-end bath products nearby. Spa-like warm lighting."
+    "Bathroom": {
+      "Bathroom Furniture and Storage": {
+        "Shower Benches": {
+          "prompt": "Modern luxury bathroom shower with water droplets on the teak, wet tiles with steam effects, spa ambiance with soft lighting, high-end bath products nearby, and plush white towels visible."
+        },
+        "Shower Organizers and Caddies": {
+          "prompt": "Elegant shower setting with water droplets on glass doors, premium toiletries arranged nearby, wet tile background, spa-like atmosphere with warm ambient lighting."
+        },
+        "Floating Wall Shelves": {
+          "prompt": "Mounted on textured luxury bathroom wall with marble countertop below, elegant decor items like candles or small plants, soft window lighting casting gentle shadows."
+        },
+        "Storage Bins and Trays": {
+          "prompt": "Organized bathroom vanity or closet shelf with neatly folded white towels visible, marble surfaces, soft ambient lighting, clean spa atmosphere."
+        },
+        "Storage": {
+          "prompt": "Luxury bathroom organization area with crisp white towels stacked nearby, marble flooring, soft vanity lighting, clean minimal aesthetic."
+        }
+      },
+      "Bath Accessories": {
+        "Floor Mats": {
+          "prompt": "Slight overhead angle on modern bathroom floor with wet footprints nearby, water droplets visible, clean white tile or natural stone flooring, bright natural lighting."
+        },
+        "Waste Baskets and Hampers": {
+          "prompt": "Elegant bathroom or bedroom corner with folded linens visible, marble or hardwood flooring, soft ambient lighting, clean spa atmosphere with textured walls."
+        },
+        "Towel Racks": {
+          "prompt": "Luxury bathroom wall with plush white towels hanging, marble tile background, soft vanity lighting with chrome fixtures visible, spa-like clean aesthetic."
+        },
+        "Side Tables": {
+          "prompt": "Elegant bathroom setting next to freestanding tub or near window, styled with candles or small plant, natural window light, marble or tile flooring visible."
+        }
+      }
     },
-    "bench": {
-      "keywords": ["bench", "stool"],
-      "prompt": "Entryway or bedroom setting with cozy textiles like a throw blanket, decorative pillow, or placed near a window with natural light. Warm, inviting home atmosphere."
+    "Indoor": {
+      "Entryway": {
+        "Entryway Benches": {
+          "prompt": "Welcoming entryway with coat hooks visible on wall, natural light from nearby window or door, cozy throw pillow or blanket, hardwood flooring, warm inviting atmosphere."
+        },
+        "Key Holders": {
+          "prompt": "Mounted on entryway wall near front door, keys hanging naturally, small decorative elements like artwork nearby, soft natural lighting, modern home interior aesthetic."
+        }
+      },
+      "Living Room": {
+        "Coffee Tables": {
+          "prompt": "Upscale living room with design books stacked, coffee cup and candle on surface, cozy sofa partially visible, large windows with natural light, contemporary elegant interior."
+        },
+        "Shelving": {
+          "prompt": "Mounted on living room wall with carefully curated decor items like small plants and framed photos, books arranged artfully, soft natural window lighting."
+        },
+        "Storage": {
+          "prompt": "Organized living space with neatly arranged home goods, modern interior design elements visible, clean minimalist aesthetic, natural window lighting."
+        },
+        "Tissue Boxes and Hangers": {
+          "prompt": "Tastefully placed in elegant living room setting on side table or shelf, complementary decor nearby, soft ambient lighting, sophisticated contemporary interior."
+        },
+        "Waste Baskets and Hampers": {
+          "prompt": "Discreetly placed in upscale living room corner or bedroom, coordinating with modern decor, hardwood flooring, soft natural lighting, clean elegant aesthetic."
+        }
+      },
+      "Kitchen": {
+        "Bar and Counter Stools": {
+          "prompt": "Positioned at modern kitchen island or breakfast bar with marble or quartz countertop, pendant lighting overhead, bright airy kitchen atmosphere, contemporary design."
+        },
+        "Countertop Accessories": {
+          "prompt": "Placed on elegant marble or granite kitchen countertop with fresh produce or cooking ingredients nearby, bright clean kitchen lighting, high-end contemporary aesthetic."
+        },
+        "Dining": {
+          "prompt": "Sophisticated dining room with natural window light, elegant place settings visible, hardwood flooring, warm inviting atmosphere for entertaining."
+        },
+        "Floor Mats": {
+          "prompt": "Positioned on clean kitchen floor in front of sink or stove area, bright overhead lighting, modern appliances partially visible, water droplets or natural kitchen activity."
+        }
+      }
     },
-    "chair": {
-      "keywords": ["chair", "seating"],
-      "prompt": "Elegant dining room or living space with complementary furniture visible, natural window lighting, and styled with a cushion or throw. Sophisticated interior design."
-    },
-    "shelf": {
-      "keywords": ["shelf", "floating"],
-      "prompt": "Mounted on a textured wall with elegant decor items like small plants or candles. Soft natural window lighting with gentle shadows."
-    },
-    "outdoor": {
-      "keywords": ["outdoor", "patio", "parasol", "lounger", "daybed", "sofa", "loveseat", "dining"],
-      "prompt": "Beautiful patio or garden deck with lush greenery, outdoor cushions if applicable, and warm golden hour sunlight."
-    },
-    "hamper": {
-      "keywords": ["hamper", "laundry"],
-      "prompt": "Elegant bathroom or bedroom corner with folded white towels visible, marble flooring, soft ambient lighting. Clean spa atmosphere."
-    },
-    "kitchen": {
-      "keywords": ["cutting board", "knife", "trivet", "dish", "napkin", "paper towel"],
-      "prompt": "High-end marble or granite countertop with fresh ingredients or cooking elements nearby. Bright, clean kitchen lighting."
-    },
-    "storage": {
-      "keywords": ["storage", "bin", "box", "tray", "chest"],
-      "prompt": "Organized closet shelf or bathroom vanity with neatly arranged towels or home goods. Clean, minimal luxury aesthetic."
-    },
-    "mat": {
-      "keywords": ["mat", "floor"],
-      "prompt": "Slight overhead angle on modern bathroom or kitchen floor with wet feet nearby or water droplets. Clean tile or hardwood visible."
-    },
-    "table": {
-      "keywords": ["table", "coffee"],
-      "prompt": "Upscale living room with design magazines, coffee cup, and cozy throw blanket. Large windows with natural light."
-    },
-    "cabinet": {
-      "keywords": ["cabinet", "stand", "rack"],
-      "prompt": "Luxury bathroom wall with door slightly open showing organized toiletries. Marble countertop below, soft vanity lighting."
-    },
-    "other": {
-      "keywords": [],
-      "prompt": "Appropriate upscale interior setting matching the item's function, with complementary decor. Clean, sophisticated atmosphere."
+    "Outdoor": {
+      "Furniture": {
+        "Benches": {
+          "prompt": "Beautiful garden patio or deck with lush greenery in background, natural wood deck or stone paving, warm golden hour sunlight, outdoor living atmosphere."
+        },
+        "Daybeds": {
+          "prompt": "Luxurious outdoor patio setting with plush cushions, surrounding greenery and garden plants, warm afternoon sunlight, resort-style outdoor living space."
+        },
+        "Dining Tables and Chairs": {
+          "prompt": "Elegant outdoor dining area on patio or deck with place settings visible, surrounding garden greenery, warm golden hour lighting, upscale outdoor entertaining atmosphere."
+        },
+        "Games": {
+          "prompt": "Set up on lush green lawn with outdoor entertaining area visible in background, natural daylight, casual outdoor gathering atmosphere, backyard garden setting."
+        },
+        "Garden": {
+          "prompt": "Placed in beautiful landscaped garden setting with flowering plants and greenery surrounding, natural stone pathway, soft dappled sunlight through trees."
+        },
+        "Lighting": {
+          "prompt": "Positioned in atmospheric outdoor garden or patio setting at dusk, warm glowing light emanating from fixture, surrounding greenery, magical evening ambiance."
+        },
+        "Lounge Chairs Stools and Ottomans": {
+          "prompt": "Arranged on outdoor patio or deck with plush outdoor cushions, surrounding greenery, poolside or garden setting, warm afternoon sunlight, resort-style atmosphere."
+        },
+        "Parasols": {
+          "prompt": "Open on sunny patio or deck with outdoor furniture beneath, blue sky visible, lush greenery in background, bright sunny day with dappled shade underneath."
+        },
+        "Sofas and Loveseats": {
+          "prompt": "Arranged on covered patio or outdoor living room with coordinating cushions, surrounding garden views, warm ambient lighting, luxurious outdoor entertaining space."
+        },
+        "Storage Chests": {
+          "prompt": "Positioned on outdoor deck or patio near seating area, natural wood deck surface, garden greenery visible, practical outdoor storage in upscale setting."
+        }
+      }
     }
-  },
-  
-  "generation_settings": {
-    "attempts_per_image": 3,
-    "model": "gemini",
-    "api_endpoint": "",
-    "aspect_ratio": "1:1",
-    "output_mime_type": "image/jpeg"
   }
 }

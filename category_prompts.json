@@ -3,7 +3,7 @@
   "aspect_ratio": "1:1",
   "image_size": "4K",
   
-  "base_prompt": "Create a professional lifestyle product photograph showing the item from the provided image in a realistic, styled setting. Use bright photorealistic lighting, sharp focus, high-end aesthetic. If visible, keep the logo on the product EXACTLY the same, and do not add any new logo to the product. ",
+  "base_prompt": "Create a professional lifestyle product photograph showing the item from the provided image in a realistic, styled setting. Use bright photorealistic lighting, sharp focus, high-end aesthetic. If visible, keep the logo on the product EXACTLY the same, and do not add any new logo to the product. Generally show item in use, not empty",
   
   "categories": {
     "Bathroom": {

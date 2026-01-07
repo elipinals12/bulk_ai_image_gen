@@ -9,7 +9,6 @@ import json
 import base64
 import shutil
 import requests
-import numpy as np
 from pathlib import Path
 from PIL import Image
 from io import BytesIO
@@ -31,12 +30,8 @@ INPUT_FOLDER = "aquateak_products"
 OUTPUT_FOLDER = "generated_images"
 CATEGORY_CONFIG = "category_prompts.json"
 LOG_FILE = "generation_log.txt"
-REQUEST_DELAY = 1.0
+REQUEST_DELAY = 5.0  # Increased to avoid rate limits
 TEST_MODE = True  # Set False for production run
-
-# Watermark removal alpha maps
-ALPHA_MAP_48 = "gemini_watermarks/bg_48.png"
-ALPHA_MAP_96 = "gemini_watermarks/bg_96.png"
 
 # ============================================================================
 # Helper Functions
@@ -74,101 +69,68 @@ def base64_to_image(base64_string):
     return Image.open(BytesIO(image_data))
 
 
-def get_watermark_dimensions(image_width, image_height):
-    """Determine watermark size based on image dimensions."""
-    if image_width <= 1024 or image_height <= 1024:
-        return 48, 32
-    else:
-        return 96, 64
-
-
-def remove_watermark(image):
-    """Remove Gemini watermark using reverse alpha blending."""
-    try:
-        width, height = image.size
-        wm_size, margin = get_watermark_dimensions(width, height)
-        
-        alpha_map_file = ALPHA_MAP_48 if wm_size == 48 else ALPHA_MAP_96
-        
-        if not os.path.exists(alpha_map_file):
-            tqdm.write(f"  Warning: Alpha map '{alpha_map_file}' not found")
-            return image
-        
-        alpha_img = Image.open(alpha_map_file).convert('RGB')
-        alpha_array = np.array(alpha_img).astype(np.float32)
-        alpha_map = np.max(alpha_array, axis=2) / 255.0
-        
-        img_array = np.array(image.convert('RGB')).astype(np.float32)
-        
-        x1 = width - wm_size - margin
-        y1 = height - wm_size - margin
-        x2 = width - margin
-        y2 = height - margin
-        
-        watermarked_region = img_array[y1:y2, x1:x2, :]
-        alpha_expanded = alpha_map[:, :, np.newaxis]
-        
-        epsilon = 1e-6
-        safe_alpha = np.clip(alpha_expanded, epsilon, 1.0 - epsilon)
-        
-        restored_region = watermarked_region / (1.0 - safe_alpha)
-        restored_region = np.clip(restored_region, 0, 255)
-        
-        result_array = img_array.copy()
-        result_array[y1:y2, x1:x2, :] = restored_region
-        
-        return Image.fromarray(result_array.astype(np.uint8))
-        
-    except Exception as e:
-        tqdm.write(f"  Warning: Watermark removal failed: {e}")
-        return image
-
-
 def call_gemini_api(prompt, input_image_path, api_key, model, aspect_ratio="1:1", image_size="2K"):
-    """Call Gemini API to generate styled image."""
-    try:
-        api_endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-        image_base64 = image_to_base64(input_image_path)
-        
-        headers = {
-            "x-goog-api-key": api_key,
-            "Content-Type": "application/json"
-        }
-        
-        # Build image config (imageSize only supported by Pro model)
-        image_config = {"aspectRatio": aspect_ratio}
-        if "gemini-3" in model:  # Only Pro model supports imageSize
-            image_config["imageSize"] = image_size
-        
-        body = {
-            "contents": [{
-                "parts": [
-                    {"text": prompt},
-                    {"inline_data": {"mime_type": "image/jpeg", "data": image_base64}}
-                ]
-            }],
-            "generationConfig": {
-                "responseModalities": ["IMAGE"],
-                "imageConfig": image_config
+    """Call Gemini API to generate styled image with retry logic."""
+    import time
+    
+    max_retries = 3
+    base_delay = 10  # Start with 10 second delay
+    
+    for attempt in range(max_retries):
+        try:
+            api_endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+            image_base64 = image_to_base64(input_image_path)
+            
+            headers = {
+                "x-goog-api-key": api_key,
+                "Content-Type": "application/json"
             }
-        }
-        
-        response = requests.post(api_endpoint, headers=headers, json=body, timeout=60)
-        response.raise_for_status()
-        result = response.json()
-        
-        if "candidates" in result and len(result["candidates"]) > 0:
-            parts = result["candidates"][0].get("content", {}).get("parts", [])
-            for part in parts:
-                if "inlineData" in part:
-                    image_data = part["inlineData"].get("data")
-                    if image_data:
-                        return base64_to_image(image_data)
-        
-        raise Exception("No image data in API response")
-        
-    except Exception as e:
-        raise Exception(f"API call error: {e}")
+            
+            # Build image config (imageSize only supported by Pro model)
+            image_config = {"aspectRatio": aspect_ratio}
+            if "gemini-3" in model:  # Only Pro model supports imageSize
+                image_config["imageSize"] = image_size
+            
+            body = {
+                "contents": [{
+                    "parts": [
+                        {"text": prompt},
+                        {"inline_data": {"mime_type": "image/jpeg", "data": image_base64}}
+                    ]
+                }],
+                "generationConfig": {
+                    "responseModalities": ["TEXT", "IMAGE"],
+                    "imageConfig": image_config
+                }
+            }
+            
+            response = requests.post(api_endpoint, headers=headers, json=body, timeout=60)
+            response.raise_for_status()
+            result = response.json()
+            
+            if "candidates" in result and len(result["candidates"]) > 0:
+                parts = result["candidates"][0].get("content", {}).get("parts", [])
+                for part in parts:
+                    if "inlineData" in part:
+                        image_data = part["inlineData"].get("data")
+                        if image_data:
+                            return base64_to_image(image_data)
+            
+            raise Exception("No image data in API response")
+            
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 429:  # Rate limit error
+                if attempt < max_retries - 1:
+                    wait_time = base_delay * (2 ** attempt)  # Exponential backoff
+                    tqdm.write(f"    ⏳ Rate limit hit, waiting {wait_time}s before retry...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    raise Exception(f"Rate limit exceeded after {max_retries} attempts. Wait and try again later.")
+            else:
+                raise Exception(f"HTTP {e.response.status_code}: {e}")
+        except Exception as e:
+            raise Exception(f"API call error: {e}")
 
 
 def get_category_prompt(config, top_cat, mid_cat, granular_cat):
@@ -184,6 +146,8 @@ def get_category_prompt(config, top_cat, mid_cat, granular_cat):
 
 def generate_variants(product_path, prompt, output_subfolder, api_key, model, variants_per_image, aspect_ratio, image_size):
     """Generate AI variants for single product."""
+    import time
+    
     successful = 0
     failed = 0
     
@@ -207,17 +171,14 @@ def generate_variants(product_path, prompt, output_subfolder, api_key, model, va
             if generated_image is None:
                 raise Exception("API returned None")
             
-            cleaned_image = remove_watermark(generated_image)
-            
             variant_filename = f"v{variant_num} {name_without_ext}.jpg"
             variant_path = os.path.join(output_subfolder, variant_filename)
-            cleaned_image.save(variant_path, "JPEG", quality=95)
+            generated_image.save(variant_path, "JPEG", quality=95)
             
             successful += 1
             tqdm.write(f"    ✓ Generated v{variant_num}")
             
             if variant_num < variants_per_image:
-                import time
                 time.sleep(REQUEST_DELAY)
             
         except Exception as e:
@@ -239,7 +200,11 @@ def process_granular_category(category_path, prompt, output_path, api_key, model
     if not image_files:
         return 0, 0
     
-    for image_file in tqdm(image_files, desc="    Processing images", leave=False, unit="img"):
+    # In TEST_MODE: process only 1 product per category
+    # In PRODUCTION: process all products
+    files_to_process = [image_files[0]] if TEST_MODE else image_files
+    
+    for image_file in tqdm(files_to_process, desc="    Processing images", leave=False, unit="img"):
         image_path = os.path.join(category_path, image_file)
         name_without_ext = os.path.splitext(image_file)[0]
         
@@ -251,9 +216,6 @@ def process_granular_category(category_path, prompt, output_path, api_key, model
         
         total_successful += successful
         total_failed += failed
-        
-        if TEST_MODE:
-            break
     
     return total_successful, total_failed
 
@@ -294,28 +256,20 @@ def main():
         # Get settings from JSON
         variants_per_image = config.get("variants_per_image", 3)
         aspect_ratio = config.get("aspect_ratio", "1:1")
+        image_size = config.get("image_size", "2K")
         
         print(f"Loaded configuration from {CATEGORY_CONFIG}")
         print(f"Model: {model} ({'TEST' if TEST_MODE else 'PRODUCTION'})")
         print(f"Variants per image: {variants_per_image}")
-        print(f"Aspect ratio: {aspect_ratio}\n")
+        print(f"Aspect ratio: {aspect_ratio}")
+        print(f"\n⚠️  NOTE: Visible watermarks will be added by Google")
+        print(f"    Run watermark_removal.py after generation to remove them\n")
         
         if TEST_MODE:
             print(f"{'!'*60}")
-            print("TEST MODE - Processing 3 sample images")
-            print(f"Cost: ~$0.36 (9 variants @ $0.04/image)")
+            print("TEST MODE - Processing 1 product per category")
+            print(f"Estimated cost: ~$3.60 (30 categories × 3 variants @ $0.04/image)")
             print(f"{'!'*60}\n")
-        
-        # Check for alpha maps
-        if not os.path.exists(ALPHA_MAP_48):
-            print(f"✗ ERROR: Alpha map not found: {ALPHA_MAP_48}")
-            return
-        
-        if not os.path.exists(ALPHA_MAP_96):
-            print(f"✗ ERROR: Alpha map not found: {ALPHA_MAP_96}")
-            return
-        
-        print(f"✓ Found watermark removal alpha maps\n")
         
     except Exception as e:
         print(f"\n✗ ERROR: {e}")
@@ -323,7 +277,6 @@ def main():
     
     grand_total_successful = 0
     grand_total_failed = 0
-    categories_processed = 0
     
     # Traverse 3-level hierarchy
     for top_name in os.listdir(INPUT_FOLDER):
@@ -360,19 +313,6 @@ def main():
                 
                 grand_total_successful += successful
                 grand_total_failed += failed
-                
-                if successful > 0 or failed > 0:
-                    categories_processed += 1
-                
-                if TEST_MODE and categories_processed >= 3:
-                    tqdm.write(f"\n✓ Test mode complete - processed 3 categories")
-                    break
-            
-            if TEST_MODE and categories_processed >= 3:
-                break
-        
-        if TEST_MODE and categories_processed >= 3:
-            break
     
     total_variants = grand_total_successful + grand_total_failed
     success_rate = (grand_total_successful / total_variants * 100) if total_variants > 0 else 0
@@ -385,6 +325,8 @@ Successfully generated: {grand_total_successful} / {total_variants} ({success_ra
 Failed: {grand_total_failed}
 Images saved to: {OUTPUT_FOLDER}/
 Error log: {LOG_FILE}
+
+⚠️  NEXT STEP: Run watermark_removal.py to clean images
 {'='*60}
 """
     print(summary)

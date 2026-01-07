@@ -96,6 +96,14 @@ def process_folder_structure():
         print("Run generate_images.py first")
         return
     
+    # Delete existing output folder for fresh start
+    if os.path.exists(OUTPUT_FOLDER):
+        print(f"Deleting existing folder: {OUTPUT_FOLDER}/")
+        shutil.rmtree(OUTPUT_FOLDER)
+    
+    os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+    print(f"Created fresh output folder: {OUTPUT_FOLDER}/\n")
+    
     print("="*60)
     print("Watermark Removal - Processing Generated Images")
     print("="*60)

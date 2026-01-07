@@ -19,7 +19,7 @@ from tqdm import tqdm
 # ============================================================================
 
 # API Key (get from: https://aistudio.google.com/apikey)
-GEMINI_API_KEY = "YOUR_GEMINI_API_KEY_HERE"
+GEMINI_API_KEY = "YOUR API KEY HERE"
 
 # Model selection (auto-switches based on TEST_MODE)
 GEMINI_MODEL_TEST = "gemini-2.5-flash-image"  # Fast & cheap for testing (~$0.04/image)
@@ -323,8 +323,7 @@ def main():
         print(f"Model: {model} ({'TEST' if TEST_MODE else 'PRODUCTION'})")
         print(f"Variants per image: {variants_per_image}")
         print(f"Aspect ratio: {aspect_ratio}")
-        print(f"\n⚠️  NOTE: Visible watermarks will be added by Google")
-        print(f"    Run watermark_removal.py after generation to remove them\n")
+        print(f"\n⚠️  Do not close this window during generation!")
         
         if TEST_MODE:
             print(f"{'!'*60}")
@@ -406,7 +405,7 @@ Failed: {grand_total_failed}
 Images saved to: {OUTPUT_FOLDER}/
 Error log: {LOG_FILE}
 
-⚠️  NEXT STEP: Run watermark_removal.py to clean images
+done :)
 {'='*60}
 """
     print(summary)

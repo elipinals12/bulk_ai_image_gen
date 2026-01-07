@@ -30,7 +30,7 @@ INPUT_FOLDER = "aquateak_products"
 OUTPUT_FOLDER = "generated_images"
 CATEGORY_CONFIG = "category_prompts.json"
 LOG_FILE = "generation_log.txt"
-REQUEST_DELAY = 5.0  # Increased to avoid rate limits
+REQUEST_DELAY = 0.2  # 500 RPM limit = ~300/min with safety buffer
 TEST_MODE = True  # Set False for production run
 
 # ============================================================================
@@ -144,7 +144,7 @@ def get_category_prompt(config, top_cat, mid_cat, granular_cat):
         return config.get("base_prompt", "")
 
 
-def generate_variants(product_path, prompt, output_subfolder, api_key, model, variants_per_image, aspect_ratio, image_size):
+def generate_variants(product_path, prompt, output_subfolder, api_key, model, variants_per_image, aspect_ratio, image_size, pbar=None):
     """Generate AI variants for single product."""
     import time
     
@@ -163,33 +163,48 @@ def generate_variants(product_path, prompt, output_subfolder, api_key, model, va
     except Exception as e:
         log_error(f"Failed to copy original: {e}", f"{sku} - {name_without_ext}: Failed to copy - {e}")
     
-    # Generate variants
+    # Generate variants with retry logic
     for variant_num in range(1, variants_per_image + 1):
-        try:
-            generated_image = call_gemini_api(prompt, product_path, api_key, model, aspect_ratio, image_size)
-            
-            if generated_image is None:
-                raise Exception("API returned None")
-            
-            variant_filename = f"v{variant_num} {name_without_ext}.jpg"
-            variant_path = os.path.join(output_subfolder, variant_filename)
-            generated_image.save(variant_path, "JPEG", quality=95)
-            
-            successful += 1
-            tqdm.write(f"    ✓ Generated v{variant_num}")
-            
-            if variant_num < variants_per_image:
-                time.sleep(REQUEST_DELAY)
-            
-        except Exception as e:
-            failed += 1
-            log_error(f"Variant v{variant_num} failed: {str(e)[:50]}", 
-                     f"{sku} - {name_without_ext} - v{variant_num}: {e}")
+        max_attempts = 3
+        variant_success = False
+        
+        for attempt in range(1, max_attempts + 1):
+            try:
+                generated_image = call_gemini_api(prompt, product_path, api_key, model, aspect_ratio, image_size)
+                
+                if generated_image is None:
+                    raise Exception("API returned None")
+                
+                variant_filename = f"v{variant_num} {name_without_ext}.jpg"
+                variant_path = os.path.join(output_subfolder, variant_filename)
+                generated_image.save(variant_path, "JPEG", quality=95)
+                
+                successful += 1
+                variant_success = True
+                if pbar:
+                    pbar.update(1)
+                break  # Success, exit retry loop
+                
+            except Exception as e:
+                if attempt < max_attempts:
+                    time.sleep(1)  # Brief pause before retry
+                    continue
+                else:
+                    # Final attempt failed
+                    failed += 1
+                    log_error(f"Variant v{variant_num} failed after {max_attempts} attempts: {str(e)[:50]}", 
+                             f"{sku} - {name_without_ext} - v{variant_num}: {e}")
+                    if pbar:
+                        pbar.update(1)
+        
+        # Only add delay between variants if successful and not last variant
+        if variant_success and variant_num < variants_per_image:
+            time.sleep(REQUEST_DELAY)
     
     return successful, failed
 
 
-def process_granular_category(category_path, prompt, output_path, api_key, model, variants_per_image, aspect_ratio, image_size):
+def process_granular_category(category_path, prompt, output_path, api_key, model, variants_per_image, aspect_ratio, image_size, pbar=None):
     """Process all images in a granular category folder."""
     total_successful = 0
     total_failed = 0
@@ -204,7 +219,7 @@ def process_granular_category(category_path, prompt, output_path, api_key, model
     # In PRODUCTION: process all products
     files_to_process = [image_files[0]] if TEST_MODE else image_files
     
-    for image_file in tqdm(files_to_process, desc="    Processing images", leave=False, unit="img"):
+    for image_file in files_to_process:
         image_path = os.path.join(category_path, image_file)
         name_without_ext = os.path.splitext(image_file)[0]
         
@@ -212,12 +227,51 @@ def process_granular_category(category_path, prompt, output_path, api_key, model
         os.makedirs(product_subfolder, exist_ok=True)
         
         successful, failed = generate_variants(image_path, prompt, product_subfolder, 
-                                              api_key, model, variants_per_image, aspect_ratio, image_size)
+                                              api_key, model, variants_per_image, aspect_ratio, image_size, pbar)
         
         total_successful += successful
         total_failed += failed
     
     return total_successful, total_failed
+
+
+def count_total_variants():
+    """Count total number of variants that will be generated."""
+    try:
+        config = load_config()
+        variants_per_image = config.get("variants_per_image", 3)
+        
+        total_variants = 0
+        
+        for top_name in os.listdir(INPUT_FOLDER):
+            top_path = os.path.join(INPUT_FOLDER, top_name)
+            if not os.path.isdir(top_path):
+                continue
+            
+            for mid_name in os.listdir(top_path):
+                mid_path = os.path.join(top_path, mid_name)
+                if not os.path.isdir(mid_path):
+                    continue
+                
+                for granular_name in os.listdir(mid_path):
+                    granular_path = os.path.join(mid_path, granular_name)
+                    if not os.path.isdir(granular_path):
+                        continue
+                    
+                    image_files = [f for f in os.listdir(granular_path)
+                                   if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+                    
+                    if image_files:
+                        # In TEST_MODE: 1 product per category
+                        # In PRODUCTION: all products
+                        products_count = 1 if TEST_MODE else len(image_files)
+                        total_variants += products_count * variants_per_image
+        
+        return total_variants
+        
+    except Exception as e:
+        print(f"Error counting variants: {e}")
+        return 0
 
 
 def main():
@@ -278,41 +332,48 @@ def main():
     grand_total_successful = 0
     grand_total_failed = 0
     
-    # Traverse 3-level hierarchy
-    for top_name in os.listdir(INPUT_FOLDER):
-        top_path = os.path.join(INPUT_FOLDER, top_name)
-        if not os.path.isdir(top_path):
-            continue
-        
-        print(f"\n{'='*60}")
-        print(f"Processing: {top_name}")
-        print(f"{'='*60}")
-        
-        for mid_name in os.listdir(top_path):
-            mid_path = os.path.join(top_path, mid_name)
-            if not os.path.isdir(mid_path):
+    # Count total variants for accurate progress bar
+    print("Counting images to process...")
+    total_variants = count_total_variants()
+    print(f"Total variants to generate: {total_variants}\n")
+    
+    # Create single progress bar for all variants
+    with tqdm(total=total_variants, desc="Generating images", unit="variant") as pbar:
+        # Traverse 3-level hierarchy
+        for top_name in os.listdir(INPUT_FOLDER):
+            top_path = os.path.join(INPUT_FOLDER, top_name)
+            if not os.path.isdir(top_path):
                 continue
             
-            tqdm.write(f"\n  {mid_name}")
+            print(f"\n{'='*60}")
+            print(f"Processing: {top_name}")
+            print(f"{'='*60}")
             
-            for granular_name in os.listdir(mid_path):
-                granular_path = os.path.join(mid_path, granular_name)
-                if not os.path.isdir(granular_path):
+            for mid_name in os.listdir(top_path):
+                mid_path = os.path.join(top_path, mid_name)
+                if not os.path.isdir(mid_path):
                     continue
                 
-                output_path = os.path.join(OUTPUT_FOLDER, top_name, mid_name, granular_name)
-                os.makedirs(output_path, exist_ok=True)
+                print(f"\n  {mid_name}")
                 
-                # Get prompt for this category
-                prompt = get_category_prompt(config, top_name, mid_name, granular_name)
-                
-                tqdm.write(f"    {granular_name}")
-                
-                successful, failed = process_granular_category(granular_path, prompt, output_path,
-                                                              GEMINI_API_KEY, model, variants_per_image, aspect_ratio, image_size)
-                
-                grand_total_successful += successful
-                grand_total_failed += failed
+                for granular_name in os.listdir(mid_path):
+                    granular_path = os.path.join(mid_path, granular_name)
+                    if not os.path.isdir(granular_path):
+                        continue
+                    
+                    output_path = os.path.join(OUTPUT_FOLDER, top_name, mid_name, granular_name)
+                    os.makedirs(output_path, exist_ok=True)
+                    
+                    # Get prompt for this category
+                    prompt = get_category_prompt(config, top_name, mid_name, granular_name)
+                    
+                    print(f"    {granular_name}")
+                    
+                    successful, failed = process_granular_category(granular_path, prompt, output_path,
+                                                                  GEMINI_API_KEY, model, variants_per_image, aspect_ratio, image_size, pbar)
+                    
+                    grand_total_successful += successful
+                    grand_total_failed += failed
     
     total_variants = grand_total_successful + grand_total_failed
     success_rate = (grand_total_successful / total_variants * 100) if total_variants > 0 else 0

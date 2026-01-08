@@ -2,6 +2,7 @@
 AI Image Generation Pipeline - Step 2
 Generates styled lifestyle product images using Gemini Image Generation API.
 Traverses hierarchical category structure and applies appropriate prompts.
+Generates both tight cropped and normal lifestyle shots.
 """
 
 import os
@@ -133,19 +134,23 @@ def call_gemini_api(prompt, input_image_path, api_key, model, aspect_ratio="1:1"
             raise Exception(f"API call error: {e}")
 
 
-def get_category_prompt(config, top_cat, mid_cat, granular_cat):
-    """Navigate nested config to find category prompt."""
+def get_category_prompt(config, top_cat, mid_cat, granular_cat, is_cropped=False):
+    """Navigate nested config to find category prompt and combine with base prompt."""
     try:
-        base_prompt = config.get("base_prompt", "")
+        base_prompt_key = "base_prompt_cropped" if is_cropped else "base_prompt_normal"
+        base_prompt = config.get(base_prompt_key, "")
         cat_prompt = config["categories"][top_cat][mid_cat][granular_cat]["prompt"]
         return f"{base_prompt} {cat_prompt}"
     except KeyError:
         tqdm.write(f"  Warning: Prompt not found for {top_cat}/{mid_cat}/{granular_cat}")
-        return config.get("base_prompt", "")
+        base_prompt_key = "base_prompt_cropped" if is_cropped else "base_prompt_normal"
+        return config.get(base_prompt_key, "")
 
 
-def generate_variants(product_path, prompt, output_subfolder, api_key, model, variants_per_image, aspect_ratio, image_size, overall_pbar=None, category_pbar=None):
-    """Generate AI variants for single product."""
+def generate_variants(product_path, prompt_cropped, prompt_normal, output_subfolder, api_key, model, 
+                     cropped_count, normal_count, aspect_ratio, image_size, 
+                     overall_pbar=None, category_pbar=None):
+    """Generate AI variants for single product (both cropped and normal)."""
     import time
     
     successful = 0
@@ -163,14 +168,56 @@ def generate_variants(product_path, prompt, output_subfolder, api_key, model, va
     except Exception as e:
         log_error(f"Failed to copy original: {e}", f"{sku} - {name_without_ext}: Failed to copy - {e}")
     
-    # Generate variants with retry logic
-    for variant_num in range(1, variants_per_image + 1):
+    # Generate cropped variants
+    for variant_num in range(1, cropped_count + 1):
         max_attempts = 3
         variant_success = False
         
         for attempt in range(1, max_attempts + 1):
             try:
-                generated_image = call_gemini_api(prompt, product_path, api_key, model, aspect_ratio, image_size)
+                generated_image = call_gemini_api(prompt_cropped, product_path, api_key, model, aspect_ratio, image_size)
+                
+                if generated_image is None:
+                    raise Exception("API returned None")
+                
+                variant_filename = f"v{variant_num} {name_without_ext} - cropped.jpg"
+                variant_path = os.path.join(output_subfolder, variant_filename)
+                generated_image.save(variant_path, "JPEG", quality=95)
+                
+                successful += 1
+                variant_success = True
+                if overall_pbar:
+                    overall_pbar.update(1)
+                if category_pbar:
+                    category_pbar.update(1)
+                break  # Success, exit retry loop
+                
+            except Exception as e:
+                if attempt < max_attempts:
+                    time.sleep(1)  # Brief pause before retry
+                    continue
+                else:
+                    # Final attempt failed
+                    failed += 1
+                    log_error(f"Cropped variant v{variant_num} failed after {max_attempts} attempts: {str(e)[:50]}", 
+                             f"{sku} - {name_without_ext} - v{variant_num} cropped: {e}")
+                    if overall_pbar:
+                        overall_pbar.update(1)
+                    if category_pbar:
+                        category_pbar.update(1)
+        
+        # Only add delay between variants if successful and not last variant
+        if variant_success and variant_num < cropped_count:
+            time.sleep(REQUEST_DELAY)
+    
+    # Generate normal variants
+    for variant_num in range(1, normal_count + 1):
+        max_attempts = 3
+        variant_success = False
+        
+        for attempt in range(1, max_attempts + 1):
+            try:
+                generated_image = call_gemini_api(prompt_normal, product_path, api_key, model, aspect_ratio, image_size)
                 
                 if generated_image is None:
                     raise Exception("API returned None")
@@ -194,21 +241,22 @@ def generate_variants(product_path, prompt, output_subfolder, api_key, model, va
                 else:
                     # Final attempt failed
                     failed += 1
-                    log_error(f"Variant v{variant_num} failed after {max_attempts} attempts: {str(e)[:50]}", 
-                             f"{sku} - {name_without_ext} - v{variant_num}: {e}")
+                    log_error(f"Normal variant v{variant_num} failed after {max_attempts} attempts: {str(e)[:50]}", 
+                             f"{sku} - {name_without_ext} - v{variant_num} normal: {e}")
                     if overall_pbar:
                         overall_pbar.update(1)
                     if category_pbar:
                         category_pbar.update(1)
         
         # Only add delay between variants if successful and not last variant
-        if variant_success and variant_num < variants_per_image:
+        if variant_success and variant_num < normal_count:
             time.sleep(REQUEST_DELAY)
     
     return successful, failed
 
 
-def process_granular_category(category_path, prompt, output_path, api_key, model, variants_per_image, aspect_ratio, image_size, overall_pbar, category_pbar):
+def process_granular_category(category_path, prompt_cropped, prompt_normal, output_path, api_key, model, 
+                              cropped_count, normal_count, aspect_ratio, image_size, overall_pbar, category_pbar):
     """Process all images in a granular category folder."""
     total_successful = 0
     total_failed = 0
@@ -224,7 +272,8 @@ def process_granular_category(category_path, prompt, output_path, api_key, model
     files_to_process = [image_files[0]] if TEST_MODE else image_files
     
     # Update category progress bar total
-    category_pbar.reset(total=len(files_to_process) * variants_per_image)
+    variants_per_product = cropped_count + normal_count
+    category_pbar.reset(total=len(files_to_process) * variants_per_product)
     
     for image_file in files_to_process:
         image_path = os.path.join(category_path, image_file)
@@ -233,8 +282,9 @@ def process_granular_category(category_path, prompt, output_path, api_key, model
         product_subfolder = os.path.join(output_path, name_without_ext)
         os.makedirs(product_subfolder, exist_ok=True)
         
-        successful, failed = generate_variants(image_path, prompt, product_subfolder, 
-                                              api_key, model, variants_per_image, aspect_ratio, image_size, overall_pbar, category_pbar)
+        successful, failed = generate_variants(image_path, prompt_cropped, prompt_normal, product_subfolder, 
+                                              api_key, model, cropped_count, normal_count, 
+                                              aspect_ratio, image_size, overall_pbar, category_pbar)
         
         total_successful += successful
         total_failed += failed
@@ -246,8 +296,15 @@ def count_total_variants():
     """Count total number of variants that will be generated."""
     try:
         config = load_config()
-        variants_per_image = config.get("variants_per_image", 3)
+        cropped_count = config.get("cropped_variants_per_image", 3)
+        normal_count = config.get("normal_variants_per_image", 3)
         
+        # In test mode, use 1 of each type
+        if TEST_MODE:
+            cropped_count = 1
+            normal_count = 1
+        
+        variants_per_product = cropped_count + normal_count
         total_variants = 0
         
         for top_name in os.listdir(INPUT_FOLDER):
@@ -272,7 +329,7 @@ def count_total_variants():
                         # In TEST_MODE: 1 product per category
                         # In PRODUCTION: all products
                         products_count = 1 if TEST_MODE else len(image_files)
-                        total_variants += products_count * variants_per_image
+                        total_variants += products_count * variants_per_product
         
         return total_variants
         
@@ -288,7 +345,7 @@ def main():
     print("="*60)
     
     # Validate API key
-    if GEMINI_API_KEY == "YOUR_GEMINI_API_KEY_HERE":
+    if GEMINI_API_KEY == "YOUR API KEY HERE":
         print("\n✗ ERROR: Please set GEMINI_API_KEY in generate_images.py")
         return
     
@@ -315,20 +372,28 @@ def main():
         config = load_config()
         
         # Get settings from JSON
-        variants_per_image = config.get("variants_per_image", 3)
+        cropped_count = config.get("cropped_variants_per_image", 3)
+        normal_count = config.get("normal_variants_per_image", 3)
         aspect_ratio = config.get("aspect_ratio", "1:1")
         image_size = config.get("image_size", "2K")
         
+        # In test mode, override to 1 of each
+        if TEST_MODE:
+            cropped_count = 1
+            normal_count = 1
+        
         print(f"Loaded configuration from {CATEGORY_CONFIG}")
         print(f"Model: {model} ({'TEST' if TEST_MODE else 'PRODUCTION'})")
-        print(f"Variants per image: {variants_per_image}")
+        print(f"Cropped variants per image: {cropped_count}")
+        print(f"Normal variants per image: {normal_count}")
         print(f"Aspect ratio: {aspect_ratio}")
         print(f"\n⚠️  Do not close this window during generation!")
         
         if TEST_MODE:
             print(f"{'!'*60}")
             print("TEST MODE - Processing 1 product per category")
-            print(f"Estimated cost: ~$3.60 (30 categories × 3 variants @ $0.04/image)")
+            print(f"1 cropped + 1 normal variant per product")
+            print(f"Estimated cost: ~$2.40 (30 categories × 2 variants @ $0.04/image)")
             print(f"{'!'*60}\n")
         
     except Exception as e:
@@ -375,14 +440,17 @@ def main():
                     output_path = os.path.join(OUTPUT_FOLDER, top_name, mid_name, granular_name)
                     os.makedirs(output_path, exist_ok=True)
                     
-                    # Get prompt for this category
-                    prompt = get_category_prompt(config, top_name, mid_name, granular_name)
+                    # Get prompts for this category (both cropped and normal)
+                    prompt_cropped = get_category_prompt(config, top_name, mid_name, granular_name, is_cropped=True)
+                    prompt_normal = get_category_prompt(config, top_name, mid_name, granular_name, is_cropped=False)
                     
                     # Update category progress bar description
                     category_pbar.set_description(f"Current: {granular_name[:30]}")
                     
-                    successful, failed = process_granular_category(granular_path, prompt, output_path,
-                                                                  GEMINI_API_KEY, model, variants_per_image, aspect_ratio, image_size, 
+                    successful, failed = process_granular_category(granular_path, prompt_cropped, prompt_normal, 
+                                                                  output_path, GEMINI_API_KEY, model, 
+                                                                  cropped_count, normal_count, 
+                                                                  aspect_ratio, image_size, 
                                                                   overall_pbar, category_pbar)
                     
                     grand_total_successful += successful

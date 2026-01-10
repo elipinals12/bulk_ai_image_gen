@@ -41,17 +41,16 @@ REQUEST_DELAY = 0.5
 # ============================================================================
 
 error_log = defaultdict(list)
-downloaded_products = {}  # Key: (sku, product_name), Value: category_path
+downloaded_products = {}  # Key: sku, Value: category_path
 
 # ============================================================================
 # Helper Functions
 # ============================================================================
 
-def log_skip(error_category, sku, product_name, details):
+def log_skip(error_category, sku, details):
     """Add error to categorized log."""
     error_log[error_category].append({
         'sku': sku,
-        'name': product_name,
         'details': details
     })
 
@@ -74,7 +73,6 @@ def write_log_file(total_products, successful, skipped, duplicates):
                 
                 for error in errors:
                     f.write(f"SKU: {error['sku']}\n")
-                    f.write(f"Product: {error['name']}\n")
                     f.write(f"Details: {error['details']}\n")
                     f.write("-" * 80 + "\n")
             
@@ -110,15 +108,6 @@ def write_log_file(total_products, successful, skipped, duplicates):
         print(f"Warning: Couldn't write log file: {e}")
 
 
-def sanitize_filename(name):
-    """Sanitize filename by removing invalid characters."""
-    name = name.replace('"', ' inch')
-    for char in ['/', '\\', ':', '*', '?', '<', '>', '|']:
-        name = name.replace(char, '-' if char in ['/', '\\'] else '')
-    name = name.replace('™', '').replace('®', '')
-    return re.sub(r'\s+', ' ', name).strip()
-
-
 def sanitize_folder_name(name):
     """Sanitize folder name (similar to filename but keep ampersands as 'and')."""
     name = name.replace('&', 'and')
@@ -129,7 +118,7 @@ def sanitize_folder_name(name):
     return re.sub(r'\s+', ' ', name).strip()
 
 
-def is_white_background(image_path, product_name, sku):
+def is_white_background(image_path, sku):
     """Check if image has white background by sampling perimeter pixels."""
     try:
         img = Image.open(image_path).convert('RGB')
@@ -150,14 +139,14 @@ def is_white_background(image_path, product_name, sku):
         is_white = white_ratio >= WHITE_PERCENTAGE
         
         if not is_white:
-            log_skip("Background Too Dark", sku, product_name,
+            log_skip("Background Too Dark", sku,
                     f"{white_ratio*100:.1f}% white pixels (needs {WHITE_PERCENTAGE*100:.1f}%)")
             tqdm.write(f"  ⚠ SKIP - Background too dark ({white_ratio*100:.1f}%)")
         
         return is_white
         
     except Exception as e:
-        log_skip("Background Check Error", sku, product_name, str(e))
+        log_skip("Background Check Error", sku, str(e))
         tqdm.write(f"  ⚠ SKIP - Error checking background: {e}")
         return False
 
@@ -313,55 +302,49 @@ def scrape_product_details(product):
         return product
         
     except Exception as e:
-        log_skip("Page Fetch Error", "UNKNOWN", product['name'], f"Failed to fetch: {e}")
+        log_skip("Page Fetch Error", "UNKNOWN", f"Failed to fetch: {e}")
         return None
 
 
 def download_image(product, category_folder, category_path):
     """Download product image if not duplicate."""
     sku = product.get('sku', 'UNKNOWN')
-    product_name = product['name']
     
     # Check for duplicate
-    product_key = (sku, product_name)
-    if product_key in downloaded_products:
-        log_skip("Duplicate Product", sku, product_name,
-                f"Already downloaded in: {downloaded_products[product_key]}")
-        tqdm.write(f"  ⚠ SKIP - {sku} - {product_name} - Duplicate (found in {downloaded_products[product_key]})")
+    if sku in downloaded_products:
+        log_skip("Duplicate Product", sku,
+                f"Already downloaded in: {downloaded_products[sku]}")
+        tqdm.write(f"  ⚠ SKIP - {sku} - Duplicate (found in {downloaded_products[sku]})")
         return False
     
     if not product.get('image_url'):
-        log_skip("No Image URL", sku, product_name, "No image URL found")
-        tqdm.write(f"  ⚠ SKIP - {sku} - {product_name} - No image URL")
+        log_skip("No Image URL", sku, "No image URL found")
+        tqdm.write(f"  ⚠ SKIP - {sku} - No image URL")
         return False
     
     try:
         response = requests.get(product['image_url'], timeout=15)
         response.raise_for_status()
         
-        ext = '.jpg'
-        if 'png' in product['image_url'].lower():
-            ext = '.png'
-        
-        safe_name = sanitize_filename(product_name)
-        filename = f"{sku} - {safe_name}{ext}"
+        # Always save as .jpg
+        filename = f"{sku}.jpg"
         temp_path = os.path.join(category_folder, filename)
         
         with open(temp_path, 'wb') as f:
             f.write(response.content)
         
-        if not is_white_background(temp_path, product_name, sku):
+        if not is_white_background(temp_path, sku):
             os.remove(temp_path)
             return False
         
-        downloaded_products[product_key] = category_path
+        downloaded_products[sku] = category_path
         
-        tqdm.write(f"  ✓ {sku} - {safe_name}")
+        tqdm.write(f"  ✓ {sku}")
         return True
         
     except Exception as e:
-        log_skip("Download Error", sku, product_name, str(e))
-        tqdm.write(f"  ⚠ SKIP - {sku} - {product_name} - Download error: {e}")
+        log_skip("Download Error", sku, str(e))
+        tqdm.write(f"  ⚠ SKIP - {sku} - Download error: {e}")
         return False
 
 

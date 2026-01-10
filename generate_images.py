@@ -2,7 +2,7 @@
 AI Image Generation Pipeline - Step 2
 Generates styled lifestyle product images using Gemini Image Generation API.
 Traverses hierarchical category structure and applies appropriate prompts.
-Generates both tight cropped and normal lifestyle shots.
+Generates 5 shot types: room, tight, cropped, white, white-in-use.
 """
 
 import os
@@ -20,18 +20,19 @@ from tqdm import tqdm
 # ============================================================================
 
 # API Key (get from: https://aistudio.google.com/apikey)
-GEMINI_API_KEY = "YOUR API KEY HERE"
+GEMINI_API_KEY = "API KEY HERE"
 
 # Model selection (auto-switches based on TEST_MODE)
-GEMINI_MODEL_TEST = "gemini-2.5-flash-image"  # Fast & cheap for testing (~$0.04/image)
-GEMINI_MODEL_PRODUCTION = "gemini-3-pro-image-preview"  # Best quality (~$0.13/image)
+GEMINI_MODEL_TEST = "gemini-3-pro-image-preview"  # Full pro model
+GEMINI_MODEL_PRODUCTION = "gemini-3-pro-image-preview"  # Best quality
 
 # Technical settings
 INPUT_FOLDER = "aquateak_products"
 OUTPUT_FOLDER = "generated_images"
+FLAT_OUTPUT_FOLDER = "all_generated"
 CATEGORY_CONFIG = "category_prompts.json"
 LOG_FILE = "generation_log.txt"
-REQUEST_DELAY = 0.2  # 500 RPM limit = ~300/min with safety buffer
+REQUEST_DELAY = 0.1  # Minimal delay for maximum speed
 TEST_MODE = True  # Set False for production run
 
 # ============================================================================
@@ -70,12 +71,12 @@ def base64_to_image(base64_string):
     return Image.open(BytesIO(image_data))
 
 
-def call_gemini_api(prompt, input_image_path, api_key, model, aspect_ratio="1:1", image_size="2K"):
+def call_gemini_api(prompt, input_image_path, api_key, model, aspect_ratio="1:1", image_size="4K"):
     """Call Gemini API to generate styled image with retry logic."""
     import time
     
     max_retries = 3
-    base_delay = 10  # Start with 10 second delay
+    base_delay = 10
     
     for attempt in range(max_retries):
         try:
@@ -87,9 +88,9 @@ def call_gemini_api(prompt, input_image_path, api_key, model, aspect_ratio="1:1"
                 "Content-Type": "application/json"
             }
             
-            # Build image config (imageSize only supported by Pro model)
+            # Build image config
             image_config = {"aspectRatio": aspect_ratio}
-            if "gemini-3" in model:  # Only Pro model supports imageSize
+            if "gemini-3" in model:
                 image_config["imageSize"] = image_size
             
             body = {
@@ -120,143 +121,109 @@ def call_gemini_api(prompt, input_image_path, api_key, model, aspect_ratio="1:1"
             raise Exception("No image data in API response")
             
         except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 429:  # Rate limit error
+            if e.response.status_code == 429:
                 if attempt < max_retries - 1:
-                    wait_time = base_delay * (2 ** attempt)  # Exponential backoff
+                    wait_time = base_delay * (2 ** attempt)
                     tqdm.write(f"    ⏳ Rate limit hit, waiting {wait_time}s before retry...")
                     time.sleep(wait_time)
                     continue
                 else:
-                    raise Exception(f"Rate limit exceeded after {max_retries} attempts. Wait and try again later.")
+                    raise Exception(f"Rate limit exceeded after {max_retries} attempts.")
             else:
                 raise Exception(f"HTTP {e.response.status_code}: {e}")
         except Exception as e:
             raise Exception(f"API call error: {e}")
 
 
-def get_category_prompt(config, top_cat, mid_cat, granular_cat, is_cropped=False):
+def get_category_prompt(config, top_cat, mid_cat, granular_cat, shot_type):
     """Navigate nested config to find category prompt and combine with base prompt."""
     try:
-        base_prompt_key = "base_prompt_cropped" if is_cropped else "base_prompt_normal"
+        base_prompt_key = f"base_prompt_{shot_type}"
         base_prompt = config.get(base_prompt_key, "")
         cat_prompt = config["categories"][top_cat][mid_cat][granular_cat]["prompt"]
         return f"{base_prompt} {cat_prompt}"
     except KeyError:
         tqdm.write(f"  Warning: Prompt not found for {top_cat}/{mid_cat}/{granular_cat}")
-        base_prompt_key = "base_prompt_cropped" if is_cropped else "base_prompt_normal"
+        base_prompt_key = f"base_prompt_{shot_type}"
         return config.get(base_prompt_key, "")
 
 
-def generate_variants(product_path, prompt_cropped, prompt_normal, output_subfolder, api_key, model, 
-                     cropped_count, normal_count, aspect_ratio, image_size, 
+def generate_variants(product_path, prompts_dict, output_subfolder, api_key, model, 
+                     variant_counts, aspect_ratio, image_size, 
                      overall_pbar=None, category_pbar=None):
-    """Generate AI variants for single product (both cropped and normal)."""
+    """Generate AI variants for single product (all 5 shot types)."""
     import time
     
     successful = 0
     failed = 0
     
     filename = os.path.basename(product_path)
-    name_without_ext = os.path.splitext(filename)[0]
+    sku = os.path.splitext(filename)[0]
     file_ext = os.path.splitext(filename)[1]
-    sku = name_without_ext.split(' - ')[0] if ' - ' in name_without_ext else 'UNKNOWN'
     
-    # Copy original as v0
+    # Copy original as "Original"
     try:
-        original_dest = os.path.join(output_subfolder, f"v0 {name_without_ext}{file_ext}")
+        original_dest = os.path.join(output_subfolder, f"{sku} - Original{file_ext}")
         shutil.copy2(product_path, original_dest)
     except Exception as e:
-        log_error(f"Failed to copy original: {e}", f"{sku} - {name_without_ext}: Failed to copy - {e}")
+        log_error(f"Failed to copy original: {e}", f"{sku}: Failed to copy - {e}")
     
-    # Generate cropped variants
-    for variant_num in range(1, cropped_count + 1):
-        max_attempts = 3
-        variant_success = False
+    # Shot types in order: room, tight, cropped, white, white-in-use
+    shot_types = [
+        ('room', variant_counts['room']),
+        ('tight', variant_counts['tight']),
+        ('cropped', variant_counts['cropped']),
+        ('white', variant_counts['white']),
+        ('white-in-use', variant_counts['white_in_use'])
+    ]
+    
+    for shot_type, count in shot_types:
+        prompt = prompts_dict[shot_type]
         
-        for attempt in range(1, max_attempts + 1):
-            try:
-                generated_image = call_gemini_api(prompt_cropped, product_path, api_key, model, aspect_ratio, image_size)
-                
-                if generated_image is None:
-                    raise Exception("API returned None")
-                
-                variant_filename = f"v{variant_num} {name_without_ext} - cropped.jpg"
-                variant_path = os.path.join(output_subfolder, variant_filename)
-                generated_image.save(variant_path, "JPEG", quality=95)
-                
-                successful += 1
-                variant_success = True
-                if overall_pbar:
-                    overall_pbar.update(1)
-                if category_pbar:
-                    category_pbar.update(1)
-                break  # Success, exit retry loop
-                
-            except Exception as e:
-                if attempt < max_attempts:
-                    time.sleep(1)  # Brief pause before retry
-                    continue
-                else:
-                    # Final attempt failed
-                    failed += 1
-                    log_error(f"Cropped variant v{variant_num} failed after {max_attempts} attempts: {str(e)[:50]}", 
-                             f"{sku} - {name_without_ext} - v{variant_num} cropped: {e}")
+        for variant_num in range(1, count + 1):
+            max_attempts = 3
+            variant_success = False
+            
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    generated_image = call_gemini_api(prompt, product_path, api_key, model, aspect_ratio, image_size)
+                    
+                    if generated_image is None:
+                        raise Exception("API returned None")
+                    
+                    variant_filename = f"{sku} - {shot_type} v{variant_num}.jpg"
+                    variant_path = os.path.join(output_subfolder, variant_filename)
+                    generated_image.save(variant_path, "JPEG", quality=95)
+                    
+                    successful += 1
+                    variant_success = True
                     if overall_pbar:
                         overall_pbar.update(1)
                     if category_pbar:
                         category_pbar.update(1)
-        
-        # Only add delay between variants if successful and not last variant
-        if variant_success and variant_num < cropped_count:
-            time.sleep(REQUEST_DELAY)
-    
-    # Generate normal variants
-    for variant_num in range(1, normal_count + 1):
-        max_attempts = 3
-        variant_success = False
-        
-        for attempt in range(1, max_attempts + 1):
-            try:
-                generated_image = call_gemini_api(prompt_normal, product_path, api_key, model, aspect_ratio, image_size)
-                
-                if generated_image is None:
-                    raise Exception("API returned None")
-                
-                variant_filename = f"v{variant_num} {name_without_ext}.jpg"
-                variant_path = os.path.join(output_subfolder, variant_filename)
-                generated_image.save(variant_path, "JPEG", quality=95)
-                
-                successful += 1
-                variant_success = True
-                if overall_pbar:
-                    overall_pbar.update(1)
-                if category_pbar:
-                    category_pbar.update(1)
-                break  # Success, exit retry loop
-                
-            except Exception as e:
-                if attempt < max_attempts:
-                    time.sleep(1)  # Brief pause before retry
-                    continue
-                else:
-                    # Final attempt failed
-                    failed += 1
-                    log_error(f"Normal variant v{variant_num} failed after {max_attempts} attempts: {str(e)[:50]}", 
-                             f"{sku} - {name_without_ext} - v{variant_num} normal: {e}")
-                    if overall_pbar:
-                        overall_pbar.update(1)
-                    if category_pbar:
-                        category_pbar.update(1)
-        
-        # Only add delay between variants if successful and not last variant
-        if variant_success and variant_num < normal_count:
-            time.sleep(REQUEST_DELAY)
+                    break
+                    
+                except Exception as e:
+                    if attempt < max_attempts:
+                        time.sleep(1)
+                        continue
+                    else:
+                        failed += 1
+                        log_error(f"{shot_type} v{variant_num} failed: {str(e)[:50]}", 
+                                 f"{sku} - v{variant_num} {shot_type}: {e}")
+                        if overall_pbar:
+                            overall_pbar.update(1)
+                        if category_pbar:
+                            category_pbar.update(1)
+            
+            if variant_success and not (shot_type == shot_types[-1][0] and variant_num == count):
+                time.sleep(REQUEST_DELAY)
     
     return successful, failed
 
 
-def process_granular_category(category_path, prompt_cropped, prompt_normal, output_path, api_key, model, 
-                              cropped_count, normal_count, aspect_ratio, image_size, overall_pbar, category_pbar):
+def process_granular_category(category_path, prompts_dict, output_path, api_key, model, 
+                              variant_counts, aspect_ratio, image_size, overall_pbar, category_pbar):
     """Process all images in a granular category folder."""
     total_successful = 0
     total_failed = 0
@@ -267,23 +234,20 @@ def process_granular_category(category_path, prompt_cropped, prompt_normal, outp
     if not image_files:
         return 0, 0
     
-    # In TEST_MODE: process only 1 product per category
-    # In PRODUCTION: process all products
     files_to_process = [image_files[0]] if TEST_MODE else image_files
     
-    # Update category progress bar total
-    variants_per_product = cropped_count + normal_count
-    category_pbar.reset(total=len(files_to_process) * variants_per_product)
+    total_variants = sum(variant_counts.values())
+    category_pbar.reset(total=len(files_to_process) * total_variants)
     
     for image_file in files_to_process:
         image_path = os.path.join(category_path, image_file)
-        name_without_ext = os.path.splitext(image_file)[0]
+        sku = os.path.splitext(image_file)[0]
         
-        product_subfolder = os.path.join(output_path, name_without_ext)
+        product_subfolder = os.path.join(output_path, sku)
         os.makedirs(product_subfolder, exist_ok=True)
         
-        successful, failed = generate_variants(image_path, prompt_cropped, prompt_normal, product_subfolder, 
-                                              api_key, model, cropped_count, normal_count, 
+        successful, failed = generate_variants(image_path, prompts_dict, product_subfolder, 
+                                              api_key, model, variant_counts, 
                                               aspect_ratio, image_size, overall_pbar, category_pbar)
         
         total_successful += successful
@@ -296,15 +260,19 @@ def count_total_variants():
     """Count total number of variants that will be generated."""
     try:
         config = load_config()
-        cropped_count = config.get("cropped_variants_per_image", 3)
-        normal_count = config.get("normal_variants_per_image", 3)
         
-        # In test mode, use 1 of each type
+        variant_counts = {
+            'room': config.get("room_variants_per_image", 3),
+            'tight': config.get("tight_variants_per_image", 3),
+            'cropped': config.get("cropped_variants_per_image", 2),
+            'white': config.get("white_variants_per_image", 1),
+            'white_in_use': config.get("white_in_use_variants_per_image", 1)
+        }
+        
         if TEST_MODE:
-            cropped_count = 1
-            normal_count = 1
+            variant_counts = {k: 1 for k in variant_counts.keys()}
         
-        variants_per_product = cropped_count + normal_count
+        total_variants_per_product = sum(variant_counts.values())
         total_variants = 0
         
         for top_name in os.listdir(INPUT_FOLDER):
@@ -326,10 +294,8 @@ def count_total_variants():
                                    if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
                     
                     if image_files:
-                        # In TEST_MODE: 1 product per category
-                        # In PRODUCTION: all products
                         products_count = 1 if TEST_MODE else len(image_files)
-                        total_variants += products_count * variants_per_product
+                        total_variants += products_count * total_variants_per_product
         
         return total_variants
         
@@ -338,13 +304,45 @@ def count_total_variants():
         return 0
 
 
+def flatten_structure():
+    """Copy all images from hierarchical structure to single flat folder."""
+    print("\n" + "="*60)
+    print("Flattening folder structure...")
+    print("="*60)
+    
+    if os.path.exists(FLAT_OUTPUT_FOLDER):
+        shutil.rmtree(FLAT_OUTPUT_FOLDER)
+    
+    os.makedirs(FLAT_OUTPUT_FOLDER, exist_ok=True)
+    
+    img_extensions = (".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff")
+    seen_names = {}
+    total_copied = 0
+    
+    for root, _, files in os.walk(OUTPUT_FOLDER):
+        for filename in files:
+            if filename.lower().endswith(img_extensions):
+                src_path = os.path.join(root, filename)
+                
+                name, ext = os.path.splitext(filename)
+                count = seen_names.get(filename, 0)
+                seen_names[filename] = count + 1
+                
+                new_name = filename if count == 0 else f"{name}_{count}{ext}"
+                dst_path = os.path.join(FLAT_OUTPUT_FOLDER, new_name)
+                
+                shutil.copy2(src_path, dst_path)
+                total_copied += 1
+    
+    print(f"\n✓ Copied {total_copied} images to {FLAT_OUTPUT_FOLDER}/")
+
+
 def main():
     """Main generation workflow."""
     print("="*60)
     print("AI Image Generation Pipeline - Step 2")
     print("="*60)
     
-    # Validate API key
     if GEMINI_API_KEY == "YOUR API KEY HERE":
         print("\n✗ ERROR: Please set GEMINI_API_KEY in generate_images.py")
         return
@@ -364,36 +362,44 @@ def main():
     os.makedirs(OUTPUT_FOLDER, exist_ok=True)
     print(f"Created fresh output folder: {OUTPUT_FOLDER}/\n")
     
-    # Select model based on TEST_MODE
     model = GEMINI_MODEL_TEST if TEST_MODE else GEMINI_MODEL_PRODUCTION
     
-    # Load configuration
     try:
         config = load_config()
         
-        # Get settings from JSON
-        cropped_count = config.get("cropped_variants_per_image", 3)
-        normal_count = config.get("normal_variants_per_image", 3)
-        aspect_ratio = config.get("aspect_ratio", "1:1")
-        image_size = config.get("image_size", "2K")
+        variant_counts = {
+            'room': config.get("room_variants_per_image", 3),
+            'tight': config.get("tight_variants_per_image", 3),
+            'cropped': config.get("cropped_variants_per_image", 2),
+            'white': config.get("white_variants_per_image", 1),
+            'white_in_use': config.get("white_in_use_variants_per_image", 1)
+        }
         
-        # In test mode, override to 1 of each
+        aspect_ratio = config.get("aspect_ratio", "1:1")
+        image_size = config.get("image_size", "4K")
+        
         if TEST_MODE:
-            cropped_count = 1
-            normal_count = 1
+            variant_counts = {k: 1 for k in variant_counts.keys()}
+        
+        total_per_product = sum(variant_counts.values())
         
         print(f"Loaded configuration from {CATEGORY_CONFIG}")
         print(f"Model: {model} ({'TEST' if TEST_MODE else 'PRODUCTION'})")
-        print(f"Cropped variants per image: {cropped_count}")
-        print(f"Normal variants per image: {normal_count}")
+        print(f"Variants per image:")
+        print(f"  Room shots: {variant_counts['room']}")
+        print(f"  Tight shots: {variant_counts['tight']}")
+        print(f"  Cropped shots: {variant_counts['cropped']}")
+        print(f"  White refresh: {variant_counts['white']}")
+        print(f"  White in-use: {variant_counts['white_in_use']}")
+        print(f"  Total per product: {total_per_product}")
         print(f"Aspect ratio: {aspect_ratio}")
-        print(f"\n⚠️  Do not close this window during generation!")
+        print(f"\n⚠️ Do not close this window during generation!")
         
         if TEST_MODE:
             print(f"{'!'*60}")
             print("TEST MODE - Processing 1 product per category")
-            print(f"1 cropped + 1 normal variant per product")
-            print(f"Estimated cost: ~$2.40 (30 categories × 2 variants @ $0.04/image)")
+            print(f"1 of each shot type (5 total variants per product)")
+            print(f"Estimated cost: ~$36 (150 variants @ $0.24/image at 4K)")
             print(f"{'!'*60}\n")
         
     except Exception as e:
@@ -403,19 +409,14 @@ def main():
     grand_total_successful = 0
     grand_total_failed = 0
     
-    # Count total variants for accurate progress bar
     print("Counting images to process...")
     total_variants = count_total_variants()
     print(f"Total variants to generate: {total_variants}\n")
     
-    # Create nested progress bars
-    # Overall progress (stays visible)
     overall_pbar = tqdm(total=total_variants, desc="Overall Progress", position=0, leave=True, unit="variant")
-    # Category progress (updates for each category)
     category_pbar = tqdm(total=0, desc="Current Category", position=1, leave=False, unit="variant")
     
     try:
-        # Traverse 3-level hierarchy
         for top_name in os.listdir(INPUT_FOLDER):
             top_path = os.path.join(INPUT_FOLDER, top_name)
             if not os.path.isdir(top_path):
@@ -440,16 +441,16 @@ def main():
                     output_path = os.path.join(OUTPUT_FOLDER, top_name, mid_name, granular_name)
                     os.makedirs(output_path, exist_ok=True)
                     
-                    # Get prompts for this category (both cropped and normal)
-                    prompt_cropped = get_category_prompt(config, top_name, mid_name, granular_name, is_cropped=True)
-                    prompt_normal = get_category_prompt(config, top_name, mid_name, granular_name, is_cropped=False)
+                    # Build prompts dict for all 5 shot types
+                    prompts_dict = {}
+                    for shot_type in ['room', 'tight', 'cropped', 'white', 'white-in-use']:
+                        prompts_dict[shot_type] = get_category_prompt(config, top_name, mid_name, granular_name, shot_type)
                     
-                    # Update category progress bar description
                     category_pbar.set_description(f"Current: {granular_name[:30]}")
                     
-                    successful, failed = process_granular_category(granular_path, prompt_cropped, prompt_normal, 
+                    successful, failed = process_granular_category(granular_path, prompts_dict, 
                                                                   output_path, GEMINI_API_KEY, model, 
-                                                                  cropped_count, normal_count, 
+                                                                  variant_counts, 
                                                                   aspect_ratio, image_size, 
                                                                   overall_pbar, category_pbar)
                     
@@ -457,9 +458,11 @@ def main():
                     grand_total_failed += failed
     
     finally:
-        # Close progress bars
         category_pbar.close()
         overall_pbar.close()
+    
+    # Flatten structure after generation
+    flatten_structure()
     
     total_variants = grand_total_successful + grand_total_failed
     success_rate = (grand_total_successful / total_variants * 100) if total_variants > 0 else 0
@@ -470,7 +473,8 @@ GENERATION COMPLETE
 {'='*60}
 Successfully generated: {grand_total_successful} / {total_variants} ({success_rate:.1f}%)
 Failed: {grand_total_failed}
-Images saved to: {OUTPUT_FOLDER}/
+Hierarchical images: {OUTPUT_FOLDER}/
+Flat dump: {FLAT_OUTPUT_FOLDER}/
 Error log: {LOG_FILE}
 
 done :)

@@ -1,119 +1,128 @@
 {
-  "cropped_variants_per_image": 3,
-  "normal_variants_per_image": 3,
+  "room_variants_per_image": 3,
+  "tight_variants_per_image": 3,
+  "cropped_variants_per_image": 2,
+  "white_variants_per_image": 1,
+  "white_in_use_variants_per_image": 1,
   "aspect_ratio": "1:1",
   "image_size": "4K",
   
-  "base_prompt_cropped": "Professional product photography with tight crop on the item from the provided image. Clean backdrop showing product in realistic use, sharp focus, high-end aesthetic. Keep any visible logos EXACTLY the same.",
+  "base_prompt_room": "Professional lifestyle photograph showing the item from the provided image in its natural setting with pulled-back perspective showing room context. MAINTAIN ACCURATE PRODUCT SCALE - the item should be sized realistically relative to surroundings. Natural in-use presentation with a few complementary items nearby, not cluttered. Sharp focus on main product, chill luxury aesthetic with balanced ambient lighting, not over-the-top. Replicate main product logo EXACTLY as shown, generic styling for accessories.",
   
-  "base_prompt_normal": "Professional lifestyle photograph showing the item from the provided image in a realistic styled setting. Sharp focus, high-end aesthetic. Keep any visible logos EXACTLY the same.",
+  "base_prompt_tight": "Professional product photograph with tight framing showing the complete item from the provided image, pulled in close but with full product visible in frame. MAINTAIN ACCURATE PRODUCT SCALE. Clean setting showing product in realistic context with minimal surrounding items. Sharp focus, high-end aesthetic with balanced natural lighting. Replicate main product logo EXACTLY as shown.",
+  
+  "base_prompt_cropped": "Professional close-up detail shot of the item from the provided image, zoomed in to show texture, materials, and craftsmanship. May show approximately half or portion of product, focusing on interesting details like wood grain, joinery, or hardware. Sharp focus, high-end aesthetic, natural lighting highlighting materials and quality.",
+  
+  "base_prompt_white": "Professional studio product photograph of the item from the provided image on pure white seamless background. Clean, crisp lighting setup with soft shadows, premium commercial photography quality. MAINTAIN ACCURATE PRODUCT SCALE. Sharp focus showing product clearly with enhanced lighting compared to typical white background shots. Nothing else in frame, just the product beautifully lit.",
+  
+  "base_prompt_white-in-use": "Professional studio product photograph of the item from the provided image on pure white seamless background, showing product in natural use with appropriate items on or with it (towels on hooks, items in baskets, etc). Clean studio lighting, premium quality. MAINTAIN ACCURATE PRODUCT SCALE. Sharp focus with the product styled naturally as it would be used. Generic styling for accessory items.",
   
   "categories": {
     "Bathroom": {
       "Bathroom Furniture and Storage": {
         "Shower Benches": {
-          "prompt": "Modern bathroom shower with wet tile surfaces, spa ambiance with ambient lighting, bath products and towels nearby."
+          "prompt": "Spa-like shower setting with wet tile surfaces and ambient lighting. Product shown with wet surfaces, minimal bath products nearby (1-2 bottles, maybe a towel). NO steam, NO running water, NO logo copies on bottles. Natural bathroom atmosphere."
         },
         "Shower Organizers and Caddies": {
-          "prompt": "Elegant shower area with wet surfaces, premium toiletries arranged, spa atmosphere."
+          "prompt": "Elegant shower area with wet tile surfaces. Organized with a few premium toiletries (2-3 bottles maximum). NO steam, NO running water. Clean spa atmosphere with proper product scale."
         },
         "Floating Wall Shelves": {
-          "prompt": "Mounted on bathroom wall with elegant decor items, natural or ambient lighting, textured surfaces."
+          "prompt": "Mounted on wall in bathroom, bedroom, or hallway with a few elegant decor items (2-3 items). Natural or ambient lighting, clean surfaces. Can show 1-2 shelves together. Maintain realistic shelf scale."
         },
         "Storage Bins and Trays": {
-          "prompt": "Organized bathroom vanity with folded towels, clean surfaces, soft lighting."
+          "prompt": "Bathroom vanity or organized space with neatly folded towels or organized items inside. Clean surfaces, soft lighting. Keep product scale realistic."
         },
         "Storage": {
-          "prompt": "Bathroom organization area with towels and essentials, clean aesthetic."
+          "prompt": "Bathroom, bedroom, or spa setting with towels and essentials organized naturally. Clean aesthetic, proper scale relative to space."
         }
       },
       "Bath Accessories": {
         "Floor Mats": {
-          "prompt": "Bathroom floor with wet footprints nearby, clean tile or stone flooring, natural lighting."
+          "prompt": "Bathroom floor in front of shower or bath with wet surface nearby. Clean tile or stone flooring, natural lighting. Maybe slippers on or near mat. Few subtle footprints acceptable, not excessive."
         },
         "Waste Baskets and Hampers": {
-          "prompt": "Bathroom or bedroom corner with folded linens, modern flooring, ambient lighting."
+          "prompt": "Bathroom, bedroom, spa locker room, or laundry room setting. Show product both open and closed in different variants when applicable. Folded linens or items nearby, modern flooring, ambient lighting."
         },
         "Towel Racks": {
-          "prompt": "Bathroom wall with plush towels hanging, tile background, modern fixtures visible."
+          "prompt": "Bathroom wall with plush towels hanging naturally. Tile or painted wall background, modern fixtures visible. Can also function as general wall hooks."
         },
         "Side Tables": {
-          "prompt": "Bathroom setting near tub or window, styled with candles or plants, natural light."
+          "prompt": "Bathroom near tub or window, or bedroom setting. Styled with candles, plants, or small items (1-2 pieces). Natural light, clean aesthetic."
         }
       }
     },
     "Indoor": {
       "Entryway": {
         "Entryway Benches": {
-          "prompt": "Welcoming entryway with coat hooks visible, natural light from window or door, cozy textiles, hardwood flooring."
+          "prompt": "Welcoming entryway, mudroom, or bedroom setting. Coat hooks or decor visible in background, natural light from window or door. Cozy textiles like cushion or throw, hardwood flooring."
         },
         "Key Holders": {
-          "prompt": "Mounted near front door with keys hanging, decorative elements nearby, modern home interior."
+          "prompt": "Mounted near front door, in entryway, or bathroom as towel hook. Keys or towels hanging naturally, decorative elements nearby. Modern home interior, maintain proper scale."
         }
       },
       "Living Room": {
         "Coffee Tables": {
-          "prompt": "Living room with books or coffee on surface, sofa partially visible, natural window light, contemporary interior."
+          "prompt": "Living room with a book or coffee cup on surface, sofa partially visible in background. Natural window light, contemporary interior. Keep table scale realistic relative to furniture."
         },
         "Shelving": {
-          "prompt": "Living room wall with curated decor items, plants and photos, natural lighting."
+          "prompt": "Living room, bedroom, or office wall with curated decor items (2-4 pieces), plants, or photos. Natural lighting, clean organization."
         },
         "Storage": {
-          "prompt": "Organized living space with home goods, modern design elements, clean aesthetic."
+          "prompt": "Organized living space, bedroom, or office with home goods neatly arranged. Modern design elements, clean aesthetic."
         },
         "Tissue Boxes and Hangers": {
-          "prompt": "Living room setting on side table or shelf, complementary decor, ambient lighting."
+          "prompt": "Living room side table or shelf for tissue boxes. Wall hooks or closet for hangers with appropriate items (coats on hooks, clothes on hangers). Complementary decor, ambient lighting."
         },
         "Waste Baskets and Hampers": {
-          "prompt": "Living room or bedroom corner, coordinating with decor, modern flooring."
+          "prompt": "Living room, bedroom, or bathroom corner coordinating with decor. Modern flooring, clean aesthetic."
         }
       },
       "Kitchen": {
         "Bar and Counter Stools": {
-          "prompt": "Kitchen island or breakfast bar with countertop, pendant lighting overhead, contemporary kitchen."
+          "prompt": "Kitchen island or breakfast bar with countertop visible. Show close-up of one stool with others visible at bar in background. Pendant lighting overhead, contemporary kitchen."
         },
         "Countertop Accessories": {
-          "prompt": "Kitchen countertop with fresh ingredients or cooking elements nearby, clean lighting."
+          "prompt": "Kitchen countertop with fresh ingredients or cooking elements nearby (1-2 items). Clean balanced lighting, organized kitchen aesthetic."
         },
         "Dining": {
-          "prompt": "Dining room or area with natural light, place settings, warm inviting atmosphere."
+          "prompt": "Dining room or area with natural light, simple place setting (1-2 pieces of dinnerware). Warm inviting atmosphere, proper furniture scale."
         },
         "Floor Mats": {
-          "prompt": "Kitchen floor near sink or stove area, modern appliances visible, natural activity."
+          "prompt": "Kitchen floor near sink or stove area with modern appliances visible in background. Natural kitchen activity feel, balanced lighting."
         }
       }
     },
     "Outdoor": {
       "Furniture": {
         "Benches": {
-          "prompt": "Garden patio or deck with greenery in background, natural wood or stone surface, warm sunlight."
+          "prompt": "Garden patio, deck, or poolside with greenery in background. Natural wood or stone surface nearby, warm sunlight. Keep bench scale realistic."
         },
         "Daybeds": {
-          "prompt": "Outdoor patio with plush cushions, surrounding garden plants, afternoon sunlight."
+          "prompt": "Outdoor patio or poolside with plush cushions, surrounding garden plants in background. Afternoon sunlight, relaxation setting."
         },
         "Dining Tables and Chairs": {
-          "prompt": "Outdoor dining area on patio with place settings, surrounding greenery, natural lighting."
+          "prompt": "Outdoor dining area on patio or deck with simple place setting (1-2 pieces). Surrounding greenery visible, natural daytime lighting."
         },
         "Games": {
-          "prompt": "Set up on lawn with outdoor area in background, natural daylight, backyard setting."
+          "prompt": "Set up on lawn or patio with outdoor area in background. Natural daylight, backyard setting. Single game setup, not multiples side by side."
         },
         "Garden": {
-          "prompt": "Landscaped garden setting with flowering plants and greenery, stone pathway or natural elements."
+          "prompt": "Landscaped garden setting with flowering plants and greenery. Stone pathway or natural elements, outdoor garden ambiance."
         },
         "Lighting": {
-          "prompt": "Outdoor garden or patio setting at dusk, warm glowing light from fixture, surrounding greenery."
+          "prompt": "Outdoor garden or patio setting at dusk with warm glowing light from fixture. Surrounding greenery visible, evening ambiance."
         },
         "Lounge Chairs, Stools and Ottomans": {
-          "prompt": "Outdoor patio or deck with outdoor cushions, surrounding greenery, poolside or garden setting."
+          "prompt": "Outdoor patio, deck, or poolside with outdoor cushions. Surrounding greenery, garden or pool setting. For stools show close-up of one with others visible in background. Natural outdoor lighting."
         },
         "Parasols": {
-          "prompt": "Open on patio or deck with outdoor furniture beneath, blue sky, lush greenery in background."
+          "prompt": "Open on patio or deck with outdoor furniture beneath or nearby. Blue sky above, lush greenery in background, sunny day."
         },
         "Sofas and Loveseats": {
-          "prompt": "Covered patio or outdoor living area with cushions, garden views, ambient lighting."
+          "prompt": "Covered patio or outdoor living area with cushions, garden views in background. Ambient lighting, relaxed outdoor living setting."
         },
         "Storage Chests": {
-          "prompt": "Outdoor deck or patio near seating area, natural wood surface, garden greenery visible."
+          "prompt": "Outdoor deck or patio near seating area. Natural wood surface nearby, garden greenery visible in background."
         }
       }
     }

@@ -108,6 +108,15 @@ def write_log_file(total_products, successful, skipped, duplicates):
         print(f"Warning: Couldn't write log file: {e}")
 
 
+def sanitize_filename(name):
+    """Sanitize filename by removing invalid characters."""
+    name = name.replace('"', ' inch')
+    for char in ['/', '\\', ':', '*', '?', '<', '>', '|']:
+        name = name.replace(char, '-' if char in ['/', '\\'] else '')
+    name = name.replace('™', '').replace('®', '')
+    return re.sub(r'\s+', ' ', name).strip()
+
+
 def sanitize_folder_name(name):
     """Sanitize folder name (similar to filename but keep ampersands as 'and')."""
     name = name.replace('&', 'and')
@@ -309,6 +318,7 @@ def scrape_product_details(product):
 def download_image(product, category_folder, category_path):
     """Download product image if not duplicate."""
     sku = product.get('sku', 'UNKNOWN')
+    product_name = product['name']
     
     # Check for duplicate
     if sku in downloaded_products:
@@ -326,8 +336,15 @@ def download_image(product, category_folder, category_path):
         response = requests.get(product['image_url'], timeout=15)
         response.raise_for_status()
         
-        # Always save as .jpg
-        filename = f"{sku}.jpg"
+        # Detect original format and preserve it
+        content_type = response.headers.get('content-type', '')
+        if 'png' in content_type.lower() or product['image_url'].lower().endswith('.png'):
+            ext = '.png'
+        else:
+            ext = '.jpg'
+        
+        safe_name = sanitize_filename(product_name)
+        filename = f"{sku} - {safe_name}{ext}"
         temp_path = os.path.join(category_folder, filename)
         
         with open(temp_path, 'wb') as f:
@@ -339,7 +356,7 @@ def download_image(product, category_folder, category_path):
         
         downloaded_products[sku] = category_path
         
-        tqdm.write(f"  ✓ {sku}")
+        tqdm.write(f"  ✓ {sku} - {safe_name}")
         return True
         
     except Exception as e:

@@ -135,17 +135,29 @@ def call_gemini_api(prompt, input_image_path, api_key, model, aspect_ratio="1:1"
             raise Exception(f"API call error: {e}")
 
 
-def get_category_prompt(config, top_cat, mid_cat, granular_cat, shot_type):
-    """Navigate nested config to find category prompt and combine with base prompt."""
+def get_category_prompt(config, top_cat, mid_cat, granular_cat, shot_type, product_name):
+    """Navigate nested config to find category prompt and combine with base prompt.
+    White shots (white and white-in-use) use ONLY base prompt, no category context.
+    Product name always included to help AI understand what it's generating."""
     try:
         base_prompt_key = f"base_prompt_{shot_type}"
         base_prompt = config.get(base_prompt_key, "")
+        
+        # Always include product name for context
+        prompt_with_product = f"Product: {product_name}. {base_prompt}"
+        
+        # White shots use ONLY base prompt - no category context to avoid lifestyle bleed
+        if shot_type in ['white', 'white-in-use']:
+            return prompt_with_product
+        
+        # Other shot types combine base + category
         cat_prompt = config["categories"][top_cat][mid_cat][granular_cat]["prompt"]
-        return f"{base_prompt} {cat_prompt}"
+        return f"{prompt_with_product} Setting: {cat_prompt}"
     except KeyError:
         tqdm.write(f"  Warning: Prompt not found for {top_cat}/{mid_cat}/{granular_cat}")
         base_prompt_key = f"base_prompt_{shot_type}"
-        return config.get(base_prompt_key, "")
+        base_prompt = config.get(base_prompt_key, "")
+        return f"Product: {product_name}. {base_prompt}"
 
 
 def generate_variants(product_path, prompts_dict, output_subfolder, api_key, model, 
@@ -222,7 +234,7 @@ def generate_variants(product_path, prompts_dict, output_subfolder, api_key, mod
     return successful, failed
 
 
-def process_granular_category(category_path, prompts_dict, output_path, api_key, model, 
+def process_granular_category(category_path, top_cat, mid_cat, granular_cat, config, output_path, api_key, model, 
                               variant_counts, aspect_ratio, image_size, overall_pbar, category_pbar):
     """Process all images in a granular category folder."""
     total_successful = 0
@@ -241,10 +253,25 @@ def process_granular_category(category_path, prompts_dict, output_path, api_key,
     
     for image_file in files_to_process:
         image_path = os.path.join(category_path, image_file)
-        sku = os.path.splitext(image_file)[0]
         
+        # Extract SKU and product name from filename
+        # Format: "SKU - Product Name.jpg"
+        if ' - ' in image_file:
+            sku = image_file.split(' - ')[0]
+            product_name = ' - '.join(image_file.split(' - ')[1:])
+            product_name = os.path.splitext(product_name)[0]  # Remove extension
+        else:
+            sku = os.path.splitext(image_file)[0]
+            product_name = sku  # Fallback if no name
+        
+        # Create product subfolder using SKU only
         product_subfolder = os.path.join(output_path, sku)
         os.makedirs(product_subfolder, exist_ok=True)
+        
+        # Build prompts dict for all 5 shot types, passing product name to AI
+        prompts_dict = {}
+        for shot_type in ['room', 'tight', 'cropped', 'white', 'white-in-use']:
+            prompts_dict[shot_type] = get_category_prompt(config, top_cat, mid_cat, granular_cat, shot_type, product_name)
         
         successful, failed = generate_variants(image_path, prompts_dict, product_subfolder, 
                                               api_key, model, variant_counts, 
@@ -441,15 +468,10 @@ def main():
                     output_path = os.path.join(OUTPUT_FOLDER, top_name, mid_name, granular_name)
                     os.makedirs(output_path, exist_ok=True)
                     
-                    # Build prompts dict for all 5 shot types
-                    prompts_dict = {}
-                    for shot_type in ['room', 'tight', 'cropped', 'white', 'white-in-use']:
-                        prompts_dict[shot_type] = get_category_prompt(config, top_name, mid_name, granular_name, shot_type)
-                    
                     category_pbar.set_description(f"Current: {granular_name[:30]}")
                     
-                    successful, failed = process_granular_category(granular_path, prompts_dict, 
-                                                                  output_path, GEMINI_API_KEY, model, 
+                    successful, failed = process_granular_category(granular_path, top_name, mid_name, granular_name,
+                                                                  config, output_path, GEMINI_API_KEY, model, 
                                                                   variant_counts, 
                                                                   aspect_ratio, image_size, 
                                                                   overall_pbar, category_pbar)

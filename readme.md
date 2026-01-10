@@ -1,6 +1,50 @@
-# Product Image AI Generation Pipeline
+### Why Include Product Names in Scraper but Not Output?
+
+**Scraper includes product name:**
+- AI needs to know what product it's generating
+- "Teak Shower Bench" tells AI it's bathroom furniture
+- Prevents guessing from image alone (which fails frequently)
+- Example: Without name, AI might put bench in kitchen or living room
+
+**Generator outputs SKU only:**
+- Clean, manageable filenames for production use
+- Product name already served its purpose (informing AI)
+- SKU sufficient for identification in production systems
+- Shorter filenames easier to work with in bulk operations
+- No character limit issues with long product names
+
+**Best of both worlds:**
+- Input: "624 - Teak Shower Bench.jpg" (informative for AI)
+- AI receives: "Product: Teak Shower Bench" in prompt
+- Output: "624 - room v1.jpg" (clean for deployment)
+- AI gets context it needs without cluttering final filenames# Product Image AI Generation Pipeline
 
 Complete automated workflow for transforming white-background product photography into professionally styled lifestyle imagery using AI image generation.
+
+---
+
+## Recent Updates (Critical Fixes)
+
+### Product Name Context
+- **Issue:** AI was guessing product types from images alone, resulting in wrong settings
+- **Fix:** Scraper saves as "SKU - Product Name.jpg", generator extracts name and passes to AI
+- **Impact:** AI understands what it's generating (e.g., "Teak Shower Bench"), dramatically improves accuracy
+- **Implementation:** Input files have names, AI receives names in prompts, output files use SKU only for cleanliness
+
+### Product Identity Enforcement
+- **Issue:** AI was modifying products (moving shelves, changing screws, altering construction)
+- **Fix:** All base prompts now start with "PRODUCT MUST BE IDENTICAL to input image"
+- **Impact:** Products now match input exactly - shape, size, construction, logo preserved
+
+### White Shot Isolation
+- **Issue:** White background shots were getting room context, creating half-white/half-lifestyle hybrids
+- **Fix:** White and white-in-use shots now use ONLY base prompts (category prompts skipped)
+- **Impact:** Pure white backgrounds without lifestyle contamination
+
+### Prompt Simplification
+- **Issue:** Long detailed prompts caused over-interpretation (keys AND towels, forced open/closed)
+- **Fix:** Dramatically shortened all prompts - concise, interpretable language
+- **Impact:** Natural AI interpretation rather than rigid forced constraints
 
 ---
 
@@ -68,15 +112,15 @@ The scraper performs intelligent extraction of product images from a live e-comm
 1. Request category page (handles pagination automatically)
 2. Extract all product cards from page
 3. Follow product links to detail pages
-4. Extract SKU from product detail page HTML (searches for `<dt>SKU:</dt>`)
+4. Extract SKU and product name from product detail page
 5. Extract largest available image URL (prioritizes 1280x1280 resolution)
 6. Download image for white background validation
 7. Keep or discard based on validation result
 
 **Why visit product pages individually?**
 - SKUs not available on category listing pages
+- Product names needed for AI generation context
 - Largest image URLs only accessible from detail pages
-- Product names more reliable on detail pages
 - Enables extraction of additional metadata if needed
 
 ### White Background Validation
@@ -131,26 +175,27 @@ aquateak_products/
 ├── Bathroom/
 │   ├── Bathroom Furniture and Storage/
 │   │   ├── Shower Benches/
-│   │   │   ├── 624.jpg
-│   │   │   ├── 625.jpg
+│   │   │   ├── 624 - Teak Shower Bench.jpg
+│   │   │   ├── 625 - Corner Shower Seat.jpg
 │   │   ├── Shower Organizers and Caddies/
-│   │   │   ├── 301.jpg
+│   │   │   ├── 301 - Wall Mounted Caddy.jpg
 │   ├── Bath Accessories/
 │       ├── Floor Mats/
 │       ├── Towel Racks/
 ```
 
-**Filename format:** `{SKU}.jpg`
-- Example: `624.jpg`, `1205.jpg`
-- No product name, no versioning, no prefixes
-- Always saved as .jpg regardless of source format (PNG converted)
+**Filename format:** `{SKU} - {Product Name}.{ext}`
+- Example: `624 - Teak Shower Bench.jpg`, `1205 - Corner Shelf.png`
+- Product name included to help AI understand product during generation
+- Generator extracts name, passes to AI, but outputs use SKU only
+- **Original format preserved** (PNG stays PNG, JPG stays JPG)
 - Folder names sanitized: `&` → `and`, special chars removed, `"` → ` inch`
 
-**Why this structure?**
-- Mirrors site organization for intuitive navigation
-- Category-based prompts in AI generation require category context
-- Enables category-level processing and reporting
-- Preserves merchandising relationships
+**Why include product name in scraper?**
+- AI model receives product name to understand what it's generating
+- Prevents AI from guessing product type from image alone
+- Significantly improves generation accuracy and appropriate settings
+- Output files still use clean SKU-only names for production
 
 ### Pagination Handling
 
@@ -242,30 +287,31 @@ The 5 shot types serve distinct marketing purposes and together create a compreh
 
 #### 4. White Refresh (1 variant)
 **Purpose:** Enhanced catalog shot with better lighting than original
-**Framing:** Product on pure white seamless background
-**Content:** Just product, nothing else - enhanced version of original scrape
+**Framing:** Exact same product and angle as input, pure white background
+**Content:** Just product on white - enhanced lighting/rendering of original
 **Usage:** Primary catalog image, thumbnail grids, clean product listings
 **Why 1 variant:** Catalog images need consistency, not variety
 
 **Technical approach:**
-- Base prompt: "studio product photograph...pure white seamless background"
-- References original white background image but generates enhanced lighting
-- "Premium commercial photography quality" with "soft shadows"
-- Maintains original product perspective while improving lighting and shadows
-- More professional than typical scraped white background shots
+- Base prompt only - NO category context (prevents lifestyle bleed)
+- "PRODUCT MUST BE IDENTICAL to input image - exact same product, same angle"
+- Sometimes nearly identical to input (if input already good quality)
+- Sometimes enhanced lighting/rendering if input has poor quality or bad shadows
+- Pure white seamless background with no room context
 
 #### 5. White In-Use (1 variant)
 **Purpose:** Demonstrates product function on clean background
-**Framing:** Product on white background but styled with appropriate items
-**Content:** Product shown in use - towels on hooks, items in baskets, cushions on furniture
+**Framing:** Same product angle as input, centered on white background
+**Content:** Product with items placed on/in it (towels on hooks, items on shelves)
 **Usage:** Feature callouts, "how to use" sections, clean demonstration imagery
 **Why 1 variant:** Functional demonstration needs clarity, not artistic variety
 
 **Technical approach:**
-- Base prompt: "studio photograph...white background, showing product in natural use"
-- References original product but adds contextual items: "towels on hooks, items in baskets"
-- Maintains studio aesthetic (no room context) while showing product purpose
-- Generic styling for accessory items (not branded products)
+- Base prompt only - NO category context (prevents lifestyle bleed)
+- "PRODUCT MUST BE IDENTICAL - same angle, centered"
+- Adds contextual items: shelves get decor, hooks get towels, baskets get items
+- Pure white background - nothing around product
+- Maintains clean studio aesthetic while showing product purpose
 
 ### Naming Convention
 
@@ -296,120 +342,110 @@ The 5 shot types serve distinct marketing purposes and together create a compreh
 
 ### Prompt System Architecture
 
-**Two-tier prompt structure:**
-1. **Base prompts** (5 total) - One per shot type, defines shot characteristics
-2. **Category prompts** (30 total) - Specific to product category, defines setting details
+**Three-component prompt structure:**
+1. **Product name** - Extracted from input filename, tells AI what it's generating
+2. **Base prompts** (5 total) - One per shot type, defines shot characteristics
+3. **Category prompts** (30 total) - Specific to product category, defines setting details
+
+**CRITICAL: White shots use ONLY base prompts**
+- Room, Tight, Cropped shots: Product name + Base prompt + Category prompt
+- White, White-in-use shots: Product name + Base prompt ONLY (no category context)
+- Why: Category prompts describe room settings, causing white shots to blend with lifestyle context
 
 **How they combine:**
 ```
-Final API Prompt = Base Prompt + Category Prompt
+Room/Tight/Cropped: "Product: {Product Name}. {Base Prompt} Setting: {Category Prompt}"
+White/White-in-use: "Product: {Product Name}. {Base Prompt}"
 ```
 
-**Example for Shower Bench, Room Shot:**
+**Example for "624 - Teak Shower Bench.jpg", Room Shot:**
 ```
-Base: "Professional lifestyle photograph showing the item from the provided 
-image in its natural setting with pulled-back perspective showing room context. 
-MAINTAIN ACCURATE PRODUCT SCALE..."
+Product: "Teak Shower Bench"
+Base: "Professional lifestyle photograph. PRODUCT MUST BE IDENTICAL to input 
+image. Show in natural room setting, pulled-back view with context..."
+Category: "Spa shower with wet tile surfaces. Minimal bath products nearby..."
 
-Category: "Spa-like shower setting with wet tile surfaces and ambient lighting. 
-Product shown with wet surfaces, minimal bath products nearby (1-2 bottles, 
-maybe a towel). NO steam, NO running water..."
-
-Combined: Sent to API as single prompt with both elements
+Combined: "Product: Teak Shower Bench. Professional lifestyle photograph. 
+PRODUCT MUST BE IDENTICAL to input image. Show in natural room setting, 
+pulled-back view with context... Setting: Spa shower with wet tile surfaces. 
+Minimal bath products nearby..."
 ```
+
+**Example for "624 - Teak Shower Bench.jpg", White Shot:**
+```
+Product: "Teak Shower Bench"
+Base: "Studio product photograph on pure white seamless background. PRODUCT 
+MUST BE IDENTICAL to input image - exact same product, same angle..."
+
+Category: [NOT USED - would cause room context to bleed into white background]
+
+Final: "Product: Teak Shower Bench. Studio product photograph on pure white 
+seamless background. PRODUCT MUST BE IDENTICAL to input image - exact same 
+product, same angle..."
+```
+
+**Why include product name:**
+- AI no longer guesses what product is from image alone
+- Dramatically improves generation accuracy
+- Ensures appropriate settings and context
+- Example: "Teak Shower Bench" gets bathroom context, not kitchen
 
 ### Prompt Philosophy & Key Directives
 
 **Critical emphasis across all prompts:**
 
-#### Scale Accuracy
-**Problem identified:** AI tends to missize products when no context clues present in white background reference
-**Solution:** Every base prompt includes "MAINTAIN ACCURATE PRODUCT SCALE"
-**Implementation:** Prompts specify product should be "sized realistically relative to surroundings"
-**Why critical:** Wrong scale destroys believability (e.g., bar stool sized like dining chair)
+#### Product Identity (NEW - HIGHEST PRIORITY)
+**Problem:** AI sometimes modified products - moved shelves, changed screws, altered construction
+**Solution:** Every base prompt starts with "PRODUCT MUST BE IDENTICAL to input image"
+**Implementation:** Explicit statement about shape, size, construction, logo staying exactly the same
+**Why critical:** Product photos must represent actual product accurately - any modification breaks trust
 
-#### Clutter Reduction
-**Problem identified:** Initial generations had excessive accessories (10 bottles, 3 sponges on single bench)
-**Solution:** Specific counts in category prompts: "1-2 bottles", "2-3 items", "2-4 pieces"
-**Implementation:** Changed from generic "products around" to exact counts
-**Why critical:** Over-cluttered images feel staged and unrealistic, distract from main product
+#### Prompt Length
+**Problem:** Long detailed prompts cause over-interpretation and over-specification
+**Solution:** Shortened all prompts dramatically - concise, interpretable language
+**Implementation:** Removed excessive detail, counts, and specifications
+**Why critical:** Shorter prompts let AI interpret naturally rather than forcing rigid constraints
 
-#### Location Flexibility
-**Problem identified:** Rigid room specifications caused unnatural placements (dog bowls on dining table, hangers on nightstand)
-**Solution:** Multiple location options in prompts: "bathroom, bedroom, spa locker room, or laundry room"
-**Implementation:** OR statements and flexible language: "can show", "maybe"
-**Why critical:** Products used in multiple contexts need varied settings for natural feel
+#### White Shot Isolation (NEW - CRITICAL)
+**Problem:** White shots were getting room context, creating half-white/half-lifestyle hybrids
+**Solution:** White and white-in-use shots use ONLY base prompts, skip category prompts entirely
+**Implementation:** Logic change in generator to not combine category prompts for white types
+**Why critical:** Category prompts describe room settings which contaminate pure white backgrounds
 
-#### Lighting Balance
-**Problem identified:** Early results had "over-the-top intense fancy" lighting
-**Solution:** Changed descriptor from "professional" to "chill luxury" with "balanced ambient lighting"
-**Implementation:** Explicitly state "not over-the-top" in prompts
-**Why critical:** Excessive dramatic lighting feels unrealistic and distracts from product
-
-#### Logo Handling
-**Problem identified:** AI sometimes replicated main product logo onto accessory items (shampoo bottles copying bench brand)
-**Solution:** "Replicate main product logo EXACTLY as shown, generic styling for accessories"
-**Implementation:** Split instruction - exact replication for main product, generic for surroundings
-**Why critical:** Brand consistency on main product, but branded accessories feel like product placement
-
-#### Wet Surfaces (Bathroom Products)
-**Problem identified:** Initial bathroom shots had excessive steam and running water looking fake
-**Solution:** "Wet surfaces YES, steam NO, running water NO"
-**Implementation:** Explicit negatives in prompts with positive alternative
-**Why critical:** Wet surfaces show real use; steam/running water looks artificial and generated
+#### Natural Context Interpretation
+**Problem:** Over-specified prompts caused issues (key hooks got keys AND towels, cabinets forced open/closed)
+**Solution:** Simplified language - "keys or towels depending on setting" instead of listing both
+**Implementation:** Removed rigid specifications, let AI interpret based on room context
+**Why critical:** AI should adapt to context naturally rather than following forced combinations
 
 ### Category-Specific Customizations
 
-**Examples demonstrating prompt variety:**
+**Examples demonstrating concise, interpretable prompts:**
 
 **Shower Benches:**
 ```
-"Spa-like shower setting with wet tile surfaces and ambient lighting. 
-Product shown with wet surfaces, minimal bath products nearby (1-2 bottles, 
-maybe a towel). NO steam, NO running water, NO logo copies on bottles. 
-Natural bathroom atmosphere."
+"Spa shower with wet tile surfaces. Minimal bath products nearby. 
+No steam, no running water."
 ```
-- Specific count: "1-2 bottles" prevents clutter
-- Explicit negatives: prevents common AI mistakes
-- "Spa-like" sets upscale tone matching product positioning
+- Short and clear - no rigid counts
+- Explicit negatives prevent common mistakes
+- "Spa" sets upscale tone
 
 **Bar & Counter Stools:**
 ```
-"Kitchen island or breakfast bar with countertop visible. Show close-up 
-of one stool with others visible at bar in background. Pendant lighting 
-overhead, contemporary kitchen."
+"Kitchen island or bar. Close-up of one with others visible. 
+Pendant lighting."
 ```
-- "Close-up of one stool with others visible" solves multiple-item framing
-- Prevents AI from equally showing all stools (which looks unnatural)
-- "Others visible at bar" maintains context of multiple-seating use case
+- "Close-up of one with others visible" solves framing naturally
+- No over-specification of "exactly 2" or "all 3 visible"
 
-**Floor Mats:**
+**Key Holders:**
 ```
-"Bathroom floor in front of shower or bath with wet surface nearby. 
-Clean tile or stone flooring, natural lighting. Maybe slippers on or 
-near mat. Few subtle footprints acceptable, not excessive."
+"Near front door or bathroom wall. Keys or towels depending on setting."
 ```
-- "In front of shower or bath" (not "and") gives location flexibility
-- "Few subtle footprints...not excessive" learned from over-footprinted early versions
-- "Maybe slippers" adds realistic detail without requirement
-
-**Hampers:**
-```
-"Bathroom, bedroom, spa locker room, or laundry room setting. Show product 
-both open and closed in different variants when applicable. Folded linens 
-or items nearby, modern flooring, ambient lighting."
-```
-- Multiple location options reflect real-world usage
-- "Show both open and closed" creates variety across variants
-- Recognizes hampers function in multiple home contexts
-
-**Games (Corn Toss):**
-```
-"Set up on lawn or patio with outdoor area in background. Natural daylight, 
-backyard setting. Single game setup, not multiples side by side."
-```
-- "Single game setup" prevents AI from generating two boards (common mistake)
-- Learned from early results showing duplicate setups
+- Context-adaptive: AI chooses keys OR towels based on room
+- Previously caused issues with BOTH appearing
+- "Depending on setting" lets AI interpret naturally
 
 ### API Technical Details
 
@@ -457,14 +493,29 @@ backyard setting. Single game setup, not multiples side by side."
 ### Variant Generation Logic
 
 **Per product, per shot type:**
-1. Load original white background image
-2. Construct prompt (base + category)
-3. Encode image to base64
-4. Call Gemini API with prompt + image + config
-5. Receive generated image (base64)
-6. Decode and save as JPEG
-7. Delay 0.1 seconds (rate limiting politeness)
-8. Repeat for next variant
+1. Load original image (format: "SKU - Product Name.jpg")
+2. Extract product name from filename
+3. Construct prompt:
+   - Room/Tight/Cropped: Product name + Base + Category prompts
+   - White/White-in-use: Product name + Base prompt ONLY (skip category)
+4. Encode image to base64
+5. Call Gemini API with prompt + image + config
+6. Receive generated image (base64)
+7. Decode and save as JPEG: "SKU - type vX.jpg" (SKU only, clean filename)
+8. Delay 0.1 seconds (rate limiting politeness)
+9. Repeat for next variant
+
+**Product name flow:**
+- Input: "624 - Teak Shower Bench.jpg"
+- Extract: Product name = "Teak Shower Bench"
+- Pass to AI: "Product: Teak Shower Bench. [base prompt]..."
+- Output: "624 - room v1.jpg" (SKU only)
+
+**White shot special handling:**
+- Generator checks shot type before combining prompts
+- If type is 'white' or 'white-in-use': uses product name + base prompt only
+- This prevents category room context from bleeding into pure white backgrounds
+- Critical fix for half-white/half-lifestyle hybrid issues
 
 **Error handling:**
 - 3 retry attempts per variant with exponential backoff
@@ -624,17 +675,17 @@ all_generated/
 
 ### Naming Standards
 
-**Scraper:**
-- Pattern: `{SKU}.jpg`
-- Example: `624.jpg`
-- No spaces, no special characters
-- Always lowercase extension
+**Scraper output:**
+- Pattern: `{SKU} - {Product Name}.jpg`
+- Example: `624 - Teak Shower Bench.jpg`
+- Product name included for AI context
 
-**Generator:**
+**Generator output:**
 - Pattern: `{SKU} - {type} v{number}.jpg`
 - Example: `624 - room v1.jpg`
-- Special case: `{SKU} - Original.jpg` (no version number)
-- Spaces separate major components
+- Special case: `{SKU} - Original.jpg` (no type/version)
+- SKU only for clean filenames
+- Spaces separate components
 - Hyphens within type descriptors: `white-in-use`
 
 **Folder names:**
@@ -751,13 +802,16 @@ python generate_images.py
 
 3. **Per product:**
    - Copies original image as "{SKU} - Original.jpg"
+   - Extracts product name from input filename
    - For each of 5 shot types:
-     - Constructs prompt (base + category)
+     - Constructs prompt:
+       - Room/Tight/Cropped: Product name + Base + Category prompts
+       - White/White-in-use: Product name + Base prompt only (skips category)
      - For each variant (1 in test, configured in production):
        - Encodes original image to base64
        - Calls Gemini API with prompt + image
        - Decodes response
-       - Saves as JPEG with appropriate filename
+       - Saves as JPEG: "{SKU} - {type} vX.jpg" (SKU only)
        - Delays 0.1 seconds
    - Updates progress bars
    - Logs any errors
@@ -828,11 +882,39 @@ GEMINI_MODEL = "gemini-3-pro-image-preview"
 
 ### Why This Prompt Structure?
 
-**Two-tier system (base + category) instead of single prompts:**
-- **Consistency:** Base prompts ensure all room shots feel cohesive, all tight shots have similar framing
-- **Flexibility:** Category prompts customize scene without rewriting fundamentals
-- **Maintainability:** Change all room shots by editing one base prompt
-- **Scalability:** Add new categories without redefining shot type characteristics
+**Three-component system with conditional application:**
+- **Product name:** Always extracted from input filename and included in prompt
+- **Base prompts:** Define shot characteristics for each type
+- **Category prompts:** Only for Room/Tight/Cropped (provide room context)
+
+**Data flow:**
+- Input filename: "624 - Teak Shower Bench.jpg"
+- Extract name: "Teak Shower Bench"
+- AI receives: "Product: Teak Shower Bench. [base] Setting: [category]"
+- Output filename: "624 - room v1.jpg" (SKU only, clean)
+
+**Why include product name:**
+- AI previously guessed product type from image alone (frequently wrong)
+- Product name provides explicit context: "Teak Shower Bench" → bathroom
+- Dramatically improves generation accuracy
+- Example: Without name, bench might appear in kitchen; with name, correct bathroom context
+- Product name in prompt only - keeps output filenames clean
+
+**Why split by shot type:**
+- Lifestyle shots benefit from category-specific room details
+- White shots contaminated by any room/setting descriptions
+- Single system handles both needs elegantly
+
+**Consistency benefits:**
+- Base prompts ensure all room shots feel cohesive
+- Category prompts customize without rewriting fundamentals
+- Change all room shots by editing one base prompt
+
+**Scalability:**
+- Add new categories without redefining shot characteristics
+- White shots automatically excluded from room context
+- Product names extracted automatically from filenames
+- Maintainable as catalog grows
 
 ### Why These Specific Variant Counts?
 

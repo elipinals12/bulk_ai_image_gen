@@ -16,10 +16,33 @@
 **Best of both worlds:**
 - Input: "624 - Teak Shower Bench.jpg" (informative for AI)
 - AI receives: "Product: Teak Shower Bench" in prompt
-- Output: "624 - room v1.jpg" (clean for deployment)
-- AI gets context it needs without cluttering final filenames# Product Image AI Generation Pipeline
+- Output: "624 - 3 Full room v1.jpg" (clean for deployment)
+- AI gets context it needs without cluttering final filenames
+
+# Product Image AI Generation Pipeline
 
 Complete automated workflow for transforming white-background product photography into professionally styled lifestyle imagery using AI image generation.
+
+---
+
+## Setup Instructions
+
+### 1. Install Dependencies
+```bash
+pip install requests beautifulsoup4 pillow tqdm
+```
+
+### 2. Create API Key File
+1. Get your Gemini API key from: https://aistudio.google.com/apikey
+2. Create a file named `apikey.txt` in the project directory
+3. Paste your API key into the file (no spaces, no newlines, just the key)
+
+Example `apikey.txt`:
+```
+AIzaSyBLp3qMDbzSaN6k2bInVf8_DPReVbJj_VY
+```
+
+**Important:** Add `apikey.txt` to your `.gitignore` to keep your key secure!
 
 ---
 
@@ -30,6 +53,11 @@ Complete automated workflow for transforming white-background product photograph
 - **Fix:** Scraper saves as "SKU - Product Name.jpg", generator extracts name and passes to AI
 - **Impact:** AI understands what it's generating (e.g., "Teak Shower Bench"), dramatically improves accuracy
 - **Implementation:** Input files have names, AI receives names in prompts, output files use SKU only for cleanliness
+
+### Output Naming Convention (NEW)
+- **Format:** `SKU - # Type vX.jpg` with leading category numbers for perfect alphabetical sorting
+- **Example:** `624 - 0 Original.jpg`, `624 - 1 White refresh v1.jpg`, `624 - 3 Full room v2.jpg`
+- **Impact:** Files sort naturally by category then variant, making organization intuitive
 
 ### Product Identity Enforcement
 - **Issue:** AI was modifying products (moving shelves, changing screws, altering construction)
@@ -57,7 +85,7 @@ Convert catalog product photos (white backgrounds) into multiple styled variatio
 Three-phase pipeline with hierarchical organization:
 1. **Scraper** - Extracts product images from live website, organized by native category structure
 2. **Generator** - Creates AI-styled variants using Gemini Image Generation API with category-specific prompts
-3. **Flattener** - Automatically creates flat dump alongside hierarchical structure for easy access
+3. **Flattener** - Automatically creates flat dump alongside hierarchical structure for easy access (built into generator)
 
 ### Key Design Decisions
 
@@ -72,7 +100,7 @@ Three-phase pipeline with hierarchical organization:
 - Hierarchical maintains organization for workflow and category management
 - Flat dump provides immediate access for bulk operations, uploads, and reviews
 
-**Why SKU-only naming in scraper?**
+**Why SKU-only naming in output?**
 - Eliminates filename length issues and special character problems
 - Enables consistent cross-referencing across systems
 - Product names can change; SKUs are permanent identifiers
@@ -313,32 +341,40 @@ The 5 shot types serve distinct marketing purposes and together create a compreh
 - Pure white background - nothing around product
 - Maintains clean studio aesthetic while showing product purpose
 
-### Naming Convention
+### Naming Convention (Updated)
 
-**Format:** `SKU - type vX.jpg`
+**Format:** `SKU - # Type vX.jpg`
 
 **Complete example for SKU 624:**
 ```
-624 - Original.jpg       → Copy of original scraped image
-624 - room v1.jpg        → Room lifestyle shot, variant 1
-624 - room v2.jpg        → Room lifestyle shot, variant 2
-624 - room v3.jpg        → Room lifestyle shot, variant 3
-624 - tight v1.jpg       → Tight product shot, variant 1
-624 - tight v2.jpg       → Tight product shot, variant 2
-624 - tight v3.jpg       → Tight product shot, variant 3
-624 - cropped v1.jpg     → Cropped detail shot, variant 1
-624 - cropped v2.jpg     → Cropped detail shot, variant 2
-624 - white v1.jpg       → Refreshed white background
-624 - white-in-use v1.jpg → White background with product in use
+624 - 0 Original.jpg          → Copy of original scraped image
+624 - 1 White refresh v1.jpg  → Refreshed white background
+624 - 2 White in use v1.jpg   → White background with product in use
+624 - 3 Full room v1.jpg      → Room lifestyle shot, variant 1
+624 - 3 Full room v2.jpg      → Room lifestyle shot, variant 2
+624 - 3 Full room v3.jpg      → Room lifestyle shot, variant 3
+624 - 4 Tight v1.jpg          → Tight product shot, variant 1
+624 - 4 Tight v2.jpg          → Tight product shot, variant 2
+624 - 4 Tight v3.jpg          → Tight product shot, variant 3
+624 - 5 Cropped v1.jpg        → Cropped detail shot, variant 1
+624 - 5 Cropped v2.jpg        → Cropped detail shot, variant 2
 ```
 
 **Design rationale:**
-- SKU first enables alphabetical sorting by product
-- Type in middle enables filtering/grouping by shot type
-- Version at end follows natural variant progression
-- Spaces for readability, hyphens to separate type descriptors
-- "Original" vs "v1" distinguishes source from generated content
-- Consistent pattern enables programmatic filename parsing
+- **Leading category number (0-5):** Enables perfect alphabetical sorting by type
+- **SKU first:** Maintains product grouping
+- **Version at end:** Natural variant progression
+- **Spaces for readability:** Clean, human-friendly format
+- **"Original" vs numbered types:** Clear distinction between source and generated content
+
+**Sorting benefits:**
+When sorted alphabetically, all files organize naturally:
+1. All originals (0)
+2. All white refreshes (1)
+3. All white in-use (2)
+4. All full room shots (3)
+5. All tight shots (4)
+6. All cropped shots (5)
 
 ### Prompt System Architecture
 
@@ -501,7 +537,7 @@ Pendant lighting."
 4. Encode image to base64
 5. Call Gemini API with prompt + image + config
 6. Receive generated image (base64)
-7. Decode and save as JPEG: "SKU - type vX.jpg" (SKU only, clean filename)
+7. Decode and save as JPEG: "SKU - # Type vX.jpg" (SKU only, with category number)
 8. Delay 0.1 seconds (rate limiting politeness)
 9. Repeat for next variant
 
@@ -509,7 +545,7 @@ Pendant lighting."
 - Input: "624 - Teak Shower Bench.jpg"
 - Extract: Product name = "Teak Shower Bench"
 - Pass to AI: "Product: Teak Shower Bench. [base prompt]..."
-- Output: "624 - room v1.jpg" (SKU only)
+- Output: "624 - 3 Full room v1.jpg" (SKU with category number)
 
 **White shot special handling:**
 - Generator checks shot type before combining prompts
@@ -554,7 +590,7 @@ Pendant lighting."
 
 ### Folder Output System
 
-**Dual output structure:**
+**Dual output structure (automatic):**
 
 **1. Hierarchical (generated_images/):**
 ```
@@ -563,17 +599,17 @@ generated_images/
     └── Bathroom Furniture and Storage/
         └── Shower Benches/
             ├── 624/
-            │   ├── 624 - Original.jpg
-            │   ├── 624 - room v1.jpg
-            │   ├── 624 - room v2.jpg
-            │   ├── 624 - room v3.jpg
-            │   ├── 624 - tight v1.jpg
-            │   ├── 624 - tight v2.jpg
-            │   ├── 624 - tight v3.jpg
-            │   ├── 624 - cropped v1.jpg
-            │   ├── 624 - cropped v2.jpg
-            │   ├── 624 - white v1.jpg
-            │   └── 624 - white-in-use v1.jpg
+            │   ├── 624 - 0 Original.jpg
+            │   ├── 624 - 1 White refresh v1.jpg
+            │   ├── 624 - 2 White in use v1.jpg
+            │   ├── 624 - 3 Full room v1.jpg
+            │   ├── 624 - 3 Full room v2.jpg
+            │   ├── 624 - 3 Full room v3.jpg
+            │   ├── 624 - 4 Tight v1.jpg
+            │   ├── 624 - 4 Tight v2.jpg
+            │   ├── 624 - 4 Tight v3.jpg
+            │   ├── 624 - 5 Cropped v1.jpg
+            │   └── 624 - 5 Cropped v2.jpg
             └── 625/
                 └── [same structure]
 ```
@@ -588,12 +624,14 @@ generated_images/
 **2. Flat Dump (all_generated/):**
 ```
 all_generated/
-├── 624 - Original.jpg
-├── 624 - room v1.jpg
-├── 624 - room v2.jpg
-├── 624 - room v3.jpg
-├── 625 - Original.jpg
-├── 625 - room v1.jpg
+├── 624 - 0 Original.jpg
+├── 624 - 1 White refresh v1.jpg
+├── 624 - 2 White in use v1.jpg
+├── 624 - 3 Full room v1.jpg
+├── 624 - 3 Full room v2.jpg
+├── 624 - 3 Full room v3.jpg
+├── 625 - 0 Original.jpg
+├── 625 - 1 White refresh v1.jpg
 └── ... (all products, all variants)
 ```
 
@@ -603,8 +641,8 @@ all_generated/
 - Simple folder sharing and transfer
 - No hierarchy to navigate for quick preview
 
-**Flattening logic:**
-- Runs automatically after generation completes
+**Flattening logic (automatic):**
+- Runs automatically after generation completes (built into generate_images.py)
 - Recursively walks generated_images/ tree
 - Copies all image files to single folder
 - Handles duplicate filenames by appending _1, _2, etc.
@@ -615,6 +653,8 @@ all_generated/
 - Hierarchical for workflow, flat for operations
 - Cost: minimal (disk space, copy operation <1 min)
 - Benefit: eliminates "which folder should I use?" decisions
+
+**Note:** `remove_structure.py` is redundant - flattening is built into the main generator!
 
 ### Configuration & Costs
 
@@ -681,12 +721,13 @@ all_generated/
 - Product name included for AI context
 
 **Generator output:**
-- Pattern: `{SKU} - {type} v{number}.jpg`
-- Example: `624 - room v1.jpg`
-- Special case: `{SKU} - Original.jpg` (no type/version)
+- Pattern: `{SKU} - {#} {type} v{number}.jpg`
+- Example: `624 - 3 Full room v1.jpg`
+- Special case: `{SKU} - 0 Original.jpg` (no type/version)
 - SKU only for clean filenames
+- Leading category number (0-5) for sorting
 - Spaces separate components
-- Hyphens within type descriptors: `white-in-use`
+- Hyphens within type descriptors: `White in use`
 
 **Folder names:**
 - Source: Site navigation text
@@ -726,6 +767,11 @@ Top Category (3 types)
 **Step-by-step:**
 
 ```bash
+# 0. Setup API key
+# Create apikey.txt in project directory with your Gemini API key
+# Get key from: https://aistudio.google.com/apikey
+echo "YOUR_API_KEY_HERE" > apikey.txt
+
 # 1. Scrape product catalog
 python scraper.py
 # Output: aquateak_products/ with ~350 products organized in 30 categories
@@ -733,7 +779,7 @@ python scraper.py
 # Logs: scraper_log.txt
 
 # 2. Test generation (quality validation)
-# Set TEST_MODE = True in generate_images.py
+# Set TEST_MODE = True in generate_images.py (default)
 python generate_images.py
 # Output: generated_images/ and all_generated/ with 150 test images
 # Time: ~15-30 minutes
@@ -789,6 +835,7 @@ python generate_images.py
 ### What Happens During Generation
 
 1. **Initialization:**
+   - Loads API key from apikey.txt
    - Loads category_prompts.json
    - Determines variant counts (test: 1 each, production: configured counts)
    - Counts total images to generate for progress tracking
@@ -801,7 +848,7 @@ python generate_images.py
    - In production mode: processes all products
 
 3. **Per product:**
-   - Copies original image as "{SKU} - Original.jpg"
+   - Copies original image as "{SKU} - 0 Original.jpg"
    - Extracts product name from input filename
    - For each of 5 shot types:
      - Constructs prompt:
@@ -811,12 +858,12 @@ python generate_images.py
        - Encodes original image to base64
        - Calls Gemini API with prompt + image
        - Decodes response
-       - Saves as JPEG: "{SKU} - {type} vX.jpg" (SKU only)
+       - Saves as JPEG: "{SKU} - # Type vX.jpg" (SKU with category number)
        - Delays 0.1 seconds
    - Updates progress bars
    - Logs any errors
 
-4. **Flattening:**
+4. **Flattening (automatic):**
    - After all generation completes
    - Walks generated_images/ hierarchy
    - Copies all images to all_generated/
@@ -830,6 +877,14 @@ python generate_images.py
 
 ### Configuration Files
 
+**apikey.txt:**
+```
+YOUR_GEMINI_API_KEY_HERE
+```
+- Single line with API key (no spaces, no newlines)
+- Get from: https://aistudio.google.com/apikey
+- Add to .gitignore to keep secure!
+
 **scraper.py settings:**
 ```python
 BASE_URL = "https://aquateak.com"
@@ -841,7 +896,6 @@ REQUEST_DELAY = 0.5          # Politeness delay between requests
 
 **generate_images.py settings:**
 ```python
-GEMINI_API_KEY = "..."       # Required: API key from aistudio.google.com
 TEST_MODE = True/False       # Controls processing scope
 REQUEST_DELAY = 0.1          # Minimal delay for speed
 GEMINI_MODEL = "gemini-3-pro-image-preview"
@@ -891,7 +945,7 @@ GEMINI_MODEL = "gemini-3-pro-image-preview"
 - Input filename: "624 - Teak Shower Bench.jpg"
 - Extract name: "Teak Shower Bench"
 - AI receives: "Product: Teak Shower Bench. [base] Setting: [category]"
-- Output filename: "624 - room v1.jpg" (SKU only, clean)
+- Output filename: "624 - 3 Full room v1.jpg" (SKU with category number)
 
 **Why include product name:**
 - AI previously guessed product type from image alone (frequently wrong)
@@ -1012,6 +1066,21 @@ GEMINI_MODEL = "gemini-3-pro-image-preview"
 **Cost: Negligible (~30 seconds copy time)**
 **Benefit: Dual-structure convenience without workflow complexity**
 
+**Note:** This makes `remove_structure.py` redundant - flattening is built-in!
+
+### Why Leading Category Numbers?
+
+**Numbering system (0-5) chosen for:**
+- **Perfect alphabetical sorting:** Files naturally organize by type
+- **Intuitive grouping:** All room shots together, all white shots together
+- **Easy filtering:** Can select all "3 Full room" files at once
+- **Future-proof:** Can add new types with new numbers
+
+**Alternative (no numbers) rejected:**
+- Alphabetical sorting would mix types randomly
+- "Cropped" comes before "Full room" alphabetically (wrong order)
+- Harder to find all files of same type
+
 ---
 
 ## Category Structure & Prompts
@@ -1098,7 +1167,7 @@ GEMINI_MODEL = "gemini-3-pro-image-preview"
 2. **Request construction:**
    - Build JSON payload with prompt + image
    - Add generation config (aspect ratio, size)
-   - Set headers (API key, content type)
+   - Set headers (API key from apikey.txt, content type)
    - Set 60-second timeout
 
 3. **API call:**

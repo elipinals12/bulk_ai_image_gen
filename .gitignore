@@ -4,4 +4,5 @@ all_generated/
 scraper_log.txt
 generation_log.txt
 cleaned_images/
-r1 notes.txt
+notes/
+apikey.txt

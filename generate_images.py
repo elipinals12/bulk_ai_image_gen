@@ -3,6 +3,11 @@ AI Image Generation Pipeline - Step 2
 Generates styled lifestyle product images using Gemini Image Generation API.
 Traverses hierarchical category structure and applies appropriate prompts.
 Generates 5 shot types: room, tight, cropped, white, white-in-use.
+
+FIXED: 
+- SKU extraction verified (works correctly)
+- New naming convention with leading numbers for alphabetical sorting
+- Output format: "sku - [category#] [type] vX.jpg"
 """
 
 import os
@@ -19,8 +24,22 @@ from tqdm import tqdm
 # Configuration
 # ============================================================================
 
-# API Key (get from: https://aistudio.google.com/apikey)
-GEMINI_API_KEY = "API_KEY_HERE"
+# API Key (loaded from apikey.txt in current directory)
+def load_api_key():
+    """Load API key from apikey.txt file."""
+    try:
+        with open('apikey.txt', 'r') as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        print("\n✗ ERROR: apikey.txt not found!")
+        print("Create a file named 'apikey.txt' in the current directory")
+        print("Get your API key from: https://aistudio.google.com/apikey")
+        return None
+    except Exception as e:
+        print(f"\n✗ ERROR: Could not read apikey.txt: {e}")
+        return None
+
+GEMINI_API_KEY = load_api_key()
 
 # Model selection (auto-switches based on TEST_MODE)
 GEMINI_MODEL_TEST = "gemini-3-pro-image-preview"  # Full pro model
@@ -168,35 +187,50 @@ def get_category_prompt(config, top_cat, mid_cat, granular_cat, shot_type, produ
 def generate_variants(product_path, prompts_dict, output_subfolder, api_key, model, 
                      variant_counts, aspect_ratio, image_size, 
                      overall_pbar=None, category_pbar=None):
-    """Generate AI variants for single product (all 5 shot types)."""
+    """Generate AI variants for single product (all 5 shot types).
+    
+    NEW NAMING CONVENTION:
+    - sku - 0 Original.jpg
+    - sku - 1 White refresh vX.jpg
+    - sku - 1 White in use vX.jpg  
+    - sku - 2 Full room vX.jpg
+    - sku - 3 Tight vX.jpg
+    - sku - 4 Cropped vX.jpg
+    """
     import time
     
     successful = 0
     failed = 0
     
     filename = os.path.basename(product_path)
-    sku = os.path.splitext(filename)[0]
+    
+    # Extract SKU (everything before first " - ")
+    if ' - ' in filename:
+        sku = filename.split(' - ')[0]
+    else:
+        sku = os.path.splitext(filename)[0]
+    
     file_ext = os.path.splitext(filename)[1]
     
-    # Copy original as "Original"
-    # OUTPUT NAMING: Uses SKU only (no product name in output filename)
+    # Copy original with new naming: "sku - 0 Original.ext"
     try:
-        original_dest = os.path.join(output_subfolder, f"{sku} - Original{file_ext}")
+        original_dest = os.path.join(output_subfolder, f"{sku} - 0 Original{file_ext}")
         shutil.copy2(product_path, original_dest)
     except Exception as e:
         log_error(f"Failed to copy original: {e}", f"{sku}: Failed to copy - {e}")
     
-    # Shot types in order: room, tight, cropped, white, white-in-use
+    # Shot types with category numbers and display names
+    # Format: (internal_type, display_name, category_number, count)
     shot_types = [
-        ('room', variant_counts['room']),
-        ('tight', variant_counts['tight']),
-        ('cropped', variant_counts['cropped']),
-        ('white', variant_counts['white']),
-        ('white-in-use', variant_counts['white_in_use'])
+        ('white', 'White refresh', '1', variant_counts['white']),
+        ('white-in-use', 'White in use', '2', variant_counts['white_in_use']),
+        ('room', 'Full room', '3', variant_counts['room']),
+        ('tight', 'Tight', '4', variant_counts['tight']),
+        ('cropped', 'Cropped', '5', variant_counts['cropped'])
     ]
     
-    for shot_type, count in shot_types:
-        prompt = prompts_dict[shot_type]
+    for internal_type, display_name, cat_num, count in shot_types:
+        prompt = prompts_dict[internal_type]
         
         for variant_num in range(1, count + 1):
             max_attempts = 3
@@ -209,10 +243,9 @@ def generate_variants(product_path, prompts_dict, output_subfolder, api_key, mod
                     if generated_image is None:
                         raise Exception("API returned None")
                     
-                    # OUTPUT NAMING: SKU only, no product name
-                    # Format: "{sku} - {shot_type} v{variant_num}.jpg"
-                    # Example: "624 - tight v2.jpg"
-                    variant_filename = f"{sku} - {shot_type} v{variant_num}.jpg"
+                    # NEW OUTPUT NAMING: "sku - [cat#] [display name] v[num].jpg"
+                    # Example: "624 - 2 Full room v1.jpg"
+                    variant_filename = f"{sku} - {cat_num} {display_name} v{variant_num}.jpg"
                     variant_path = os.path.join(output_subfolder, variant_filename)
                     generated_image.save(variant_path, "JPEG", quality=95)
                     
@@ -230,14 +263,14 @@ def generate_variants(product_path, prompts_dict, output_subfolder, api_key, mod
                         continue
                     else:
                         failed += 1
-                        log_error(f"{shot_type} v{variant_num} failed: {str(e)[:50]}", 
-                                 f"{sku} - v{variant_num} {shot_type}: {e}")
+                        log_error(f"{display_name} v{variant_num} failed: {str(e)[:50]}", 
+                                 f"{sku} - v{variant_num} {display_name}: {e}")
                         if overall_pbar:
                             overall_pbar.update(1)
                         if category_pbar:
                             category_pbar.update(1)
             
-            if variant_success and not (shot_type == shot_types[-1][0] and variant_num == count):
+            if variant_success and not (internal_type == shot_types[-1][0] and variant_num == count):
                 time.sleep(REQUEST_DELAY)
     
     return successful, failed
@@ -265,9 +298,7 @@ def process_granular_category(category_path, top_cat, mid_cat, granular_cat, con
         
         # Extract SKU and product name from filename
         # INPUT FORMAT: "624 - Teak Shower Bench.jpg" (from scraper)
-        # We extract BOTH for different purposes:
-        #   - SKU: Used for output filenames (clean, short)
-        #   - Product name: Passed to AI for generation context
+        # Extract SKU (everything before first " - ")
         if ' - ' in image_file:
             sku = image_file.split(' - ')[0]
             product_name = ' - '.join(image_file.split(' - ')[1:])
@@ -384,8 +415,7 @@ def main():
     print("AI Image Generation Pipeline - Step 2")
     print("="*60)
     
-    if GEMINI_API_KEY == "YOUR API KEY HERE":
-        print("\n✗ ERROR: Please set GEMINI_API_KEY in generate_images.py")
+    if GEMINI_API_KEY is None:
         return
     
     if not os.path.exists(INPUT_FOLDER):
@@ -444,7 +474,7 @@ def main():
             print(f"{'!'*60}\n")
         
     except Exception as e:
-        print(f"\n✗ ERROR: {e}")
+        print(f"\nâœ— ERROR: {e}")
         return
     
     grand_total_successful = 0

@@ -20,7 +20,7 @@ from tqdm import tqdm
 # ============================================================================
 
 # API Key (get from: https://aistudio.google.com/apikey)
-GEMINI_API_KEY = "API KEY HERE"
+GEMINI_API_KEY = "API_KEY_HERE"
 
 # Model selection (auto-switches based on TEST_MODE)
 GEMINI_MODEL_TEST = "gemini-3-pro-image-preview"  # Full pro model
@@ -138,12 +138,17 @@ def call_gemini_api(prompt, input_image_path, api_key, model, aspect_ratio="1:1"
 def get_category_prompt(config, top_cat, mid_cat, granular_cat, shot_type, product_name):
     """Navigate nested config to find category prompt and combine with base prompt.
     White shots (white and white-in-use) use ONLY base prompt, no category context.
-    Product name always included to help AI understand what it's generating."""
+    
+    IMPORTANT: Product name is ALWAYS included in prompt sent to AI for context.
+    This helps AI understand what it's generating (e.g., "Teak Shower Bench").
+    However, output filenames use SKU only for cleanliness.
+    """
     try:
         base_prompt_key = f"base_prompt_{shot_type}"
         base_prompt = config.get(base_prompt_key, "")
         
-        # Always include product name for context
+        # Always include product name for AI context
+        # Example: "Product: Teak Shower Bench. [rest of prompt]"
         prompt_with_product = f"Product: {product_name}. {base_prompt}"
         
         # White shots use ONLY base prompt - no category context to avoid lifestyle bleed
@@ -174,6 +179,7 @@ def generate_variants(product_path, prompts_dict, output_subfolder, api_key, mod
     file_ext = os.path.splitext(filename)[1]
     
     # Copy original as "Original"
+    # OUTPUT NAMING: Uses SKU only (no product name in output filename)
     try:
         original_dest = os.path.join(output_subfolder, f"{sku} - Original{file_ext}")
         shutil.copy2(product_path, original_dest)
@@ -203,6 +209,9 @@ def generate_variants(product_path, prompts_dict, output_subfolder, api_key, mod
                     if generated_image is None:
                         raise Exception("API returned None")
                     
+                    # OUTPUT NAMING: SKU only, no product name
+                    # Format: "{sku} - {shot_type} v{variant_num}.jpg"
+                    # Example: "624 - tight v2.jpg"
                     variant_filename = f"{sku} - {shot_type} v{variant_num}.jpg"
                     variant_path = os.path.join(output_subfolder, variant_filename)
                     generated_image.save(variant_path, "JPEG", quality=95)
@@ -255,7 +264,10 @@ def process_granular_category(category_path, top_cat, mid_cat, granular_cat, con
         image_path = os.path.join(category_path, image_file)
         
         # Extract SKU and product name from filename
-        # Format: "SKU - Product Name.jpg"
+        # INPUT FORMAT: "624 - Teak Shower Bench.jpg" (from scraper)
+        # We extract BOTH for different purposes:
+        #   - SKU: Used for output filenames (clean, short)
+        #   - Product name: Passed to AI for generation context
         if ' - ' in image_file:
             sku = image_file.split(' - ')[0]
             product_name = ' - '.join(image_file.split(' - ')[1:])
@@ -264,11 +276,13 @@ def process_granular_category(category_path, top_cat, mid_cat, granular_cat, con
             sku = os.path.splitext(image_file)[0]
             product_name = sku  # Fallback if no name
         
-        # Create product subfolder using SKU only
+        # Create product subfolder using SKU only (no product name in folder structure)
         product_subfolder = os.path.join(output_path, sku)
         os.makedirs(product_subfolder, exist_ok=True)
         
-        # Build prompts dict for all 5 shot types, passing product name to AI
+        # Build prompts dict for all 5 shot types
+        # CRITICAL: Product name is passed to get_category_prompt()
+        # This ensures AI receives context: "Product: Teak Shower Bench. [prompt]"
         prompts_dict = {}
         for shot_type in ['room', 'tight', 'cropped', 'white', 'white-in-use']:
             prompts_dict[shot_type] = get_category_prompt(config, top_cat, mid_cat, granular_cat, shot_type, product_name)

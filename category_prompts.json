@@ -10,7 +10,7 @@
   "aspect_ratio": "1:1",
   "image_size": "4K",
   
-  "request_delay_seconds": 0.1,
+  "max_parallel_requests": 5,
   "api_retry_max_attempts": 3,
   "api_retry_base_delay_seconds": 10,
   "jpeg_quality": 95,

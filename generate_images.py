@@ -5,12 +5,13 @@ Traverses hierarchical category structure and applies appropriate prompts.
 Generates 5 shot types: room, tight, cropped, white, white-in-use.
 
 UPDATED:
+- FIXED: REQUEST_DELAY variable reference bug
+- ADDED: Parallel processing with ThreadPoolExecutor
+- ADDED: Configurable max_workers in JSON config
 - Open/closed variants for openable products (cabinets, hampers, storage)
 - Auto-detects openable flag per category
 - Doubles all variants for openable products
 - New naming: includes "open" or "closed" suffix
-- Clearer tight vs cropped prompts
-- Enhanced lighting specifications
 """
 
 import os
@@ -22,6 +23,8 @@ from pathlib import Path
 from PIL import Image
 from io import BytesIO
 from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 # ============================================================================
 # Configuration
@@ -43,8 +46,8 @@ def load_api_key():
 
 GEMINI_API_KEY = load_api_key()
 
-GEMINI_MODEL_TEST = "gemini-3-pro-image-preview"  # Nano Banana Pro - TOP MODEL
-GEMINI_MODEL_PRODUCTION = "gemini-3-pro-image-preview"  # Nano Banana Pro - TOP MODEL
+GEMINI_MODEL_TEST = "gemini-3-pro-image-preview"
+GEMINI_MODEL_PRODUCTION = "gemini-3-pro-image-preview"
 
 INPUT_FOLDER = "aquateak_products"
 OUTPUT_FOLDER = "generated_images"
@@ -53,18 +56,22 @@ CATEGORY_CONFIG = "category_prompts.json"
 LOG_FILE = "generation_log.txt"
 TEST_MODE = True
 
+# Thread-safe logging
+log_lock = threading.Lock()
+
 # ============================================================================
 # Helper Functions
 # ============================================================================
 
 def log_error(console_msg, log_msg):
-    """Log error to console and file."""
+    """Log error to console and file (thread-safe)."""
     tqdm.write(f"  ✗ {console_msg}")
-    try:
-        with open(LOG_FILE, 'a', encoding='utf-8') as f:
-            f.write(f"{log_msg}\n")
-    except Exception as e:
-        tqdm.write(f"  Warning: Couldn't write to log: {e}")
+    with log_lock:
+        try:
+            with open(LOG_FILE, 'a', encoding='utf-8') as f:
+                f.write(f"{log_msg}\n")
+        except Exception as e:
+            tqdm.write(f"  Warning: Couldn't write to log: {e}")
 
 
 def load_config():
@@ -91,12 +98,7 @@ def base64_to_image(base64_string):
 
 def call_gemini_api(prompt, input_image_path, api_key, model, aspect_ratio="1:1", image_size="4K", 
                    max_retries=3, base_delay=10):
-    """Call Gemini API to generate styled image with retry logic.
-    
-    Args:
-        max_retries: Maximum retry attempts (from config)
-        base_delay: Base delay for exponential backoff (from config)
-    """
+    """Call Gemini API to generate styled image with retry logic."""
     import time
     
     for attempt in range(max_retries):
@@ -126,7 +128,7 @@ def call_gemini_api(prompt, input_image_path, api_key, model, aspect_ratio="1:1"
                 }
             }
             
-            response = requests.post(api_endpoint, headers=headers, json=body, timeout=60)
+            response = requests.post(api_endpoint, headers=headers, json=body, timeout=120)
             response.raise_for_status()
             result = response.json()
             
@@ -152,25 +154,21 @@ def call_gemini_api(prompt, input_image_path, api_key, model, aspect_ratio="1:1"
             else:
                 raise Exception(f"HTTP {e.response.status_code}: {e}")
         except Exception as e:
+            if attempt < max_retries - 1:
+                time.sleep(base_delay)
+                continue
             raise Exception(f"API call error: {e}")
 
 
 def get_category_prompt(config, top_cat, mid_cat, granular_cat, shot_type, product_name, state=None):
-    """Navigate nested config to find category prompt and combine with base prompt.
-    White shots use ONLY base prompt, no category context.
-    
-    Args:
-        state: 'open' or 'closed' for openable products, None otherwise
-    """
+    """Navigate nested config to find category prompt and combine with base prompt."""
     try:
         base_prompt_key = f"base_prompt_{shot_type}"
         base_prompt = config.get(base_prompt_key, "")
         
         prompt_with_product = f"Product: {product_name}. {base_prompt}"
         
-        # White shots use ONLY base prompt
         if shot_type in ['white', 'white-in-use']:
-            # Add state modifier if applicable
             if state:
                 state_key = f"state_{state}"
                 state_modifier = config.get(state_key, "")
@@ -178,11 +176,9 @@ def get_category_prompt(config, top_cat, mid_cat, granular_cat, shot_type, produ
                     return f"{prompt_with_product} STATE: {state_modifier}"
             return prompt_with_product
         
-        # Other shot types combine base + category + state
         cat_prompt = config["categories"][top_cat][mid_cat][granular_cat]["prompt"]
         combined = f"{prompt_with_product} Setting: {cat_prompt}"
         
-        # Add state modifier if applicable
         if state:
             state_key = f"state_{state}"
             state_modifier = config.get(state_key, "")
@@ -198,20 +194,47 @@ def get_category_prompt(config, top_cat, mid_cat, granular_cat, shot_type, produ
         return f"Product: {product_name}. {base_prompt}"
 
 
-def generate_variants(product_path, prompts_dict, output_subfolder, api_key, model, 
-                     variant_counts, aspect_ratio, image_size, is_openable,
-                     request_delay, max_retries, base_delay, jpeg_quality,
-                     overall_pbar=None, category_pbar=None):
-    """Generate AI variants for single product (all 5 shot types).
-    If product is openable, generates both open and closed variants.
+def generate_single_variant(args):
+    """Generate a single variant - designed for parallel execution.
     
-    Args:
-        request_delay: Delay between API calls (from config)
-        max_retries: Retry attempts for API calls (from config)
-        base_delay: Base delay for exponential backoff (from config)
-        jpeg_quality: JPEG quality when saving images (from config)
+    Returns tuple: (success: bool, variant_info: str)
     """
-    import time
+    (product_path, prompt, output_path, variant_filename, api_key, model,
+     aspect_ratio, image_size, max_retries, base_delay, jpeg_quality) = args
+    
+    max_attempts = 3
+    
+    for attempt in range(1, max_attempts + 1):
+        try:
+            generated_image = call_gemini_api(
+                prompt, product_path, api_key, model,
+                aspect_ratio, image_size, max_retries, base_delay
+            )
+            
+            if generated_image is None:
+                raise Exception("API returned None")
+            
+            variant_path = os.path.join(output_path, variant_filename)
+            generated_image.save(variant_path, "JPEG", quality=jpeg_quality)
+            
+            return (True, variant_filename)
+            
+        except Exception as e:
+            if attempt < max_attempts:
+                import time
+                time.sleep(1)
+                continue
+            else:
+                return (False, f"{variant_filename}: {str(e)[:100]}")
+    
+    return (False, f"{variant_filename}: Unknown error")
+
+
+def generate_variants_parallel(product_path, prompts_dict, output_subfolder, api_key, model, 
+                               variant_counts, aspect_ratio, image_size, is_openable,
+                               max_retries, base_delay, jpeg_quality, max_workers,
+                               overall_pbar=None, category_pbar=None):
+    """Generate AI variants for single product using parallel execution."""
     
     successful = 0
     failed = 0
@@ -241,75 +264,56 @@ def generate_variants(product_path, prompts_dict, output_subfolder, api_key, mod
         ('cropped', 'Cropped', '5', variant_counts['cropped'])
     ]
     
-    # Determine states to generate
     states = ['closed', 'open'] if is_openable else [None]
     
+    # Build list of all variant tasks
+    tasks = []
     for state in states:
         for internal_type, display_name, cat_num, count in shot_types:
             prompt = prompts_dict[internal_type][state] if is_openable else prompts_dict[internal_type]
             
             for variant_num in range(1, count + 1):
-                max_attempts = 3
-                variant_success = False
+                if is_openable:
+                    variant_filename = f"{sku} - {cat_num} {display_name} {state} v{variant_num}.jpg"
+                else:
+                    variant_filename = f"{sku} - {cat_num} {display_name} v{variant_num}.jpg"
                 
-                for attempt in range(1, max_attempts + 1):
-                    try:
-                        generated_image = call_gemini_api(prompt, product_path, api_key, model, 
-                                                         aspect_ratio, image_size, 
-                                                         max_retries, base_delay)
-                        
-                        if generated_image is None:
-                            raise Exception("API returned None")
-                        
-                        # Build filename
-                        if is_openable:
-                            variant_filename = f"{sku} - {cat_num} {display_name} {state} v{variant_num}.jpg"
-                        else:
-                            variant_filename = f"{sku} - {cat_num} {display_name} v{variant_num}.jpg"
-                        
-                        variant_path = os.path.join(output_subfolder, variant_filename)
-                        generated_image.save(variant_path, "JPEG", quality=jpeg_quality)
-                        
-                        successful += 1
-                        variant_success = True
-                        if overall_pbar:
-                            overall_pbar.update(1)
-                        if category_pbar:
-                            category_pbar.update(1)
-                        break
-                        
-                    except Exception as e:
-                        if attempt < max_attempts:
-                            time.sleep(1)
-                            continue
-                        else:
-                            failed += 1
-                            state_suffix = f" {state}" if is_openable else ""
-                            log_error(f"{display_name}{state_suffix} v{variant_num} failed: {str(e)[:50]}", 
-                                     f"{sku} - v{variant_num} {display_name}{state_suffix}: {e}")
-                            if overall_pbar:
-                                overall_pbar.update(1)
-                            if category_pbar:
-                                category_pbar.update(1)
-                
-                if variant_success and not (state == states[-1] and internal_type == shot_types[-1][0] and variant_num == count):
-                    time.sleep(REQUEST_DELAY)
+                tasks.append((
+                    product_path, prompt, output_subfolder, variant_filename,
+                    api_key, model, aspect_ratio, image_size,
+                    max_retries, base_delay, jpeg_quality
+                ))
+    
+    # Execute tasks in parallel
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(generate_single_variant, task): task[3] for task in tasks}
+        
+        for future in as_completed(futures):
+            variant_name = futures[future]
+            try:
+                success, info = future.result()
+                if success:
+                    successful += 1
+                else:
+                    failed += 1
+                    log_error(f"Failed: {info[:50]}", f"{sku}: {info}")
+            except Exception as e:
+                failed += 1
+                log_error(f"Exception: {variant_name}", f"{sku} - {variant_name}: {e}")
+            
+            if overall_pbar:
+                overall_pbar.update(1)
+            if category_pbar:
+                category_pbar.update(1)
     
     return successful, failed
 
 
-def process_granular_category(category_path, top_cat, mid_cat, granular_cat, config, output_path, api_key, model, 
-                              variant_counts, aspect_ratio, image_size, 
-                              request_delay, max_retries, base_delay, jpeg_quality,
+def process_granular_category(category_path, top_cat, mid_cat, granular_cat, config, output_path, 
+                              api_key, model, variant_counts, aspect_ratio, image_size, 
+                              max_retries, base_delay, jpeg_quality, max_workers,
                               overall_pbar, category_pbar):
-    """Process all images in a granular category folder.
-    
-    Args:
-        request_delay: Delay between API calls (from config)
-        max_retries: Retry attempts (from config)
-        base_delay: Exponential backoff base delay (from config)
-        jpeg_quality: JPEG save quality (from config)
-    """
+    """Process all images in a granular category folder."""
     total_successful = 0
     total_failed = 0
     
@@ -321,23 +325,20 @@ def process_granular_category(category_path, top_cat, mid_cat, granular_cat, con
     
     files_to_process = [image_files[0]] if TEST_MODE else image_files
     
-    # Check if this category has openable products
     try:
         is_openable = config["categories"][top_cat][mid_cat][granular_cat].get("openable", False)
     except KeyError:
         is_openable = False
     
-    # Calculate total variants (doubled if openable)
     total_variants_per_product = sum(variant_counts.values())
     if is_openable:
-        total_variants_per_product *= 2  # Generate both open and closed
+        total_variants_per_product *= 2
     
     category_pbar.reset(total=len(files_to_process) * total_variants_per_product)
     
     for image_file in files_to_process:
         image_path = os.path.join(category_path, image_file)
         
-        # Extract SKU and product name
         if ' - ' in image_file:
             sku = image_file.split(' - ')[0]
             product_name = ' - '.join(image_file.split(' - ')[1:])
@@ -349,9 +350,7 @@ def process_granular_category(category_path, top_cat, mid_cat, granular_cat, con
         product_subfolder = os.path.join(output_path, sku)
         os.makedirs(product_subfolder, exist_ok=True)
         
-        # Build prompts dict for all shot types
         if is_openable:
-            # Generate prompts for both open and closed states
             prompts_dict = {}
             for shot_type in ['room', 'tight', 'cropped', 'white', 'white-in-use']:
                 prompts_dict[shot_type] = {
@@ -359,16 +358,17 @@ def process_granular_category(category_path, top_cat, mid_cat, granular_cat, con
                     'open': get_category_prompt(config, top_cat, mid_cat, granular_cat, shot_type, product_name, 'open')
                 }
         else:
-            # Generate prompts without state
             prompts_dict = {}
             for shot_type in ['room', 'tight', 'cropped', 'white', 'white-in-use']:
                 prompts_dict[shot_type] = get_category_prompt(config, top_cat, mid_cat, granular_cat, shot_type, product_name)
         
-        successful, failed = generate_variants(image_path, prompts_dict, product_subfolder, 
-                                              api_key, model, variant_counts, 
-                                              aspect_ratio, image_size, is_openable,
-                                              request_delay, max_retries, base_delay, jpeg_quality,
-                                              overall_pbar, category_pbar)
+        successful, failed = generate_variants_parallel(
+            image_path, prompts_dict, product_subfolder, 
+            api_key, model, variant_counts, 
+            aspect_ratio, image_size, is_openable,
+            max_retries, base_delay, jpeg_quality, max_workers,
+            overall_pbar, category_pbar
+        )
         
         total_successful += successful
         total_failed += failed
@@ -381,7 +381,6 @@ def count_total_variants():
     try:
         config = load_config()
         
-        # Load variant counts from config (no hardcoded defaults)
         variant_counts = {
             'room': config["room_variants_per_image"],
             'tight': config["tight_variants_per_image"],
@@ -390,7 +389,6 @@ def count_total_variants():
             'white_in_use': config["white_in_use_variants_per_image"]
         }
         
-        # Override for test mode
         if TEST_MODE:
             test_mode_variants = config["test_mode_variants_per_image"]
             variant_counts = {k: test_mode_variants for k in variant_counts.keys()}
@@ -413,7 +411,6 @@ def count_total_variants():
                     if not os.path.isdir(granular_path):
                         continue
                     
-                    # Check if openable
                     try:
                         is_openable = config["categories"][top_name][mid_name][granular_name].get("openable", False)
                     except KeyError:
@@ -464,13 +461,13 @@ def flatten_structure():
                 shutil.copy2(src_path, dst_path)
                 total_copied += 1
     
-    print(f"\n✓ Copied {total_copied} images to {FLAT_OUTPUT_FOLDER}/")
+    print(f"\n✔ Copied {total_copied} images to {FLAT_OUTPUT_FOLDER}/")
 
 
 def main():
     """Main generation workflow."""
     print("="*60)
-    print("AI Image Generation Pipeline - Step 2")
+    print("AI Image Generation Pipeline - Step 2 (PARALLEL)")
     print("="*60)
     
     if GEMINI_API_KEY is None:
@@ -496,7 +493,6 @@ def main():
     try:
         config = load_config()
         
-        # Load variant counts from config (no hardcoded defaults)
         variant_counts = {
             'room': config["room_variants_per_image"],
             'tight': config["tight_variants_per_image"],
@@ -505,27 +501,27 @@ def main():
             'white_in_use': config["white_in_use_variants_per_image"]
         }
         
-        # Load other config values (no hardcoded defaults)
         aspect_ratio = config["aspect_ratio"]
         image_size = config["image_size"]
-        request_delay = config["request_delay_seconds"]
         max_retries = config["api_retry_max_attempts"]
         base_delay = config["api_retry_base_delay_seconds"]
         jpeg_quality = config["jpeg_quality"]
         test_mode_variants = config["test_mode_variants_per_image"]
         
-        # Override variant counts for test mode
+        # NEW: Configurable parallelism (default 5 if not in config)
+        max_workers = config.get("max_parallel_requests", 5)
+        
         if TEST_MODE:
             variant_counts = {k: test_mode_variants for k in variant_counts.keys()}
         
         total_per_product = sum(variant_counts.values())
         
         print(f"Loaded configuration from {CATEGORY_CONFIG}")
-        print(f"Model: {model} (Nano Banana Pro - TOP MODEL)")
+        print(f"Model: {model}")
         print(f"Mode: {'TEST' if TEST_MODE else 'PRODUCTION'}")
-        print(f"Resolution: {image_size} ({aspect_ratio}) - Professional Quality")
+        print(f"Resolution: {image_size} ({aspect_ratio})")
         print(f"JPEG Quality: {jpeg_quality}")
-        print(f"Request Delay: {request_delay}s")
+        print(f"Parallel requests: {max_workers} concurrent")
         print(f"API Retry: {max_retries} attempts, {base_delay}s base delay")
         print(f"Variants per image:")
         print(f"  Room shots: {variant_counts['room']}")
@@ -536,15 +532,13 @@ def main():
         print(f"  Total per product: {total_per_product}")
         if TEST_MODE:
             print(f"  (Test mode: {test_mode_variants} variant per type)")
-        print(f"  (Doubled for openable products: cabinets, hampers, storage)")
+        print(f"  (Doubled for openable products)")
         print(f"\n⚠️ Do not close this window during generation!")
         
         if TEST_MODE:
             print(f"{'!'*60}")
             print("TEST MODE - Processing 1 product per category")
-            print(f"1 of each shot type (more for openable products)")
-            print(f"Expected time: ~40-60 minutes (Gemini 3 Pro is slower but TOP quality)")
-            print(f"Expected cost: ~$11-12")
+            print(f"Running {max_workers} parallel requests for speed")
             print(f"{'!'*60}\n")
         
     except Exception as e:
@@ -588,12 +582,13 @@ def main():
                     
                     category_pbar.set_description(f"Current: {granular_name[:30]}")
                     
-                    successful, failed = process_granular_category(granular_path, top_name, mid_name, granular_name,
-                                                                  config, output_path, GEMINI_API_KEY, model, 
-                                                                  variant_counts, 
-                                                                  aspect_ratio, image_size,
-                                                                  request_delay, max_retries, base_delay, jpeg_quality,
-                                                                  overall_pbar, category_pbar)
+                    successful, failed = process_granular_category(
+                        granular_path, top_name, mid_name, granular_name,
+                        config, output_path, GEMINI_API_KEY, model, 
+                        variant_counts, aspect_ratio, image_size,
+                        max_retries, base_delay, jpeg_quality, max_workers,
+                        overall_pbar, category_pbar
+                    )
                     
                     grand_total_successful += successful
                     grand_total_failed += failed

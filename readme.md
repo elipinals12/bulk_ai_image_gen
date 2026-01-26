@@ -88,11 +88,6 @@ pip install requests beautifulsoup4 pillow tqdm
 2. Create a file named `apikey.txt` in the project directory
 3. Paste your API key into the file (no spaces, no newlines, just the key)
 
-Example `apikey.txt`:
-```
-AIzaSyBLp3qMDbzSaN6k2bInVf8_DPReVbJj_VY
-```
-
 **Important:** Add `apikey.txt` to your `.gitignore` to keep your key secure!
 
 ---

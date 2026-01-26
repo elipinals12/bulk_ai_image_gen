@@ -15,7 +15,7 @@
   "api_retry_base_delay_seconds": 10,
   "jpeg_quality": 95,
   
-  "state_open": "Show product OPEN with interior visible and accessible.",
+  "state_open": "Show product OPEN with interior visible and accessible. Keep all walls and parts, just show one or two doors open to show interior, do not add any extra parts",
   "state_closed": "Show product CLOSED with only exterior visible.",
   
   "base_prompt_room": "Professional lifestyle photograph. PRODUCT MUST BE IDENTICAL to input image - exact same shape, size, construction. Show in natural room setting with pulled-back perspective. Few appropriate items nearby. Bright studio lighting, clean throughout.",
@@ -37,7 +37,7 @@
         },
         "Shower Organizers and Caddies": {
           "prompt": "Shower area with wet tile. Few toiletries in organizer. No steam, no running water.",
-          "openable": true
+          "openable": false
         },
         "Floating Wall Shelves": {
           "prompt": "Wall-mounted in bathroom, bedroom, or hallway. Few small decor items on shelves. Clean modern setting.",
@@ -45,7 +45,7 @@
         },
         "Storage Bins and Trays": {
           "prompt": "Bathroom or bedroom. Organized items inside. Clean surfaces, bright lighting.",
-          "openable": true
+          "openable": false
         },
         "Storage": {
           "prompt": "Bathroom, bedroom, or spa. Organized essentials visible. Clean modern aesthetic.",
@@ -54,7 +54,7 @@
       },
       "Bath Accessories": {
         "Floor Mats": {
-          "prompt": "Bathroom floor near shower or tub. Wet surface around mat. Slippers nearby. Few subtle footprints acceptable. Clean tile, bright lighting.",
+          "prompt": "Bathroom floor near shower or tub. Wet surface around mat. Slippers nearby/on matt. Nearby subtle footprints acceptable. Clean tile, bright lighting.",
           "openable": false
         },
         "Waste Baskets and Hampers": {

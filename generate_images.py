@@ -1,17 +1,11 @@
 """
 AI Image Generation Pipeline - Step 2
 Generates styled lifestyle product images using Gemini Image Generation API.
-Traverses hierarchical category structure and applies appropriate prompts.
-Generates 5 shot types: room, tight, cropped, white, white-in-use.
 
 UPDATED:
-- FIXED: REQUEST_DELAY variable reference bug
-- ADDED: Parallel processing with ThreadPoolExecutor
-- ADDED: Configurable max_workers in JSON config
-- Open/closed variants for openable products (cabinets, hampers, storage)
-- Auto-detects openable flag per category
-- Doubles all variants for openable products
-- New naming: includes "open" or "closed" suffix
+- ADDED: Full verification and retry system
+- ADDED: Tracks all expected outputs and retries failures
+- ADDED: Final verification pass
 """
 
 import os
@@ -25,6 +19,7 @@ from io import BytesIO
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+import time
 
 # ============================================================================
 # Configuration
@@ -56,32 +51,30 @@ CATEGORY_CONFIG = "category_prompts.json"
 LOG_FILE = "generation_log.txt"
 TEST_MODE = True
 
-# Thread-safe logging
+MAX_RETRY_ROUNDS = 3  # How many full retry passes for failed images
+
 log_lock = threading.Lock()
 
 # ============================================================================
 # Helper Functions
 # ============================================================================
 
-def log_error(console_msg, log_msg):
-    """Log error to console and file (thread-safe)."""
-    tqdm.write(f"  ✗ {console_msg}")
+def log_message(msg, also_print=False):
+    """Log message to file (thread-safe)."""
+    if also_print:
+        tqdm.write(msg)
     with log_lock:
         try:
             with open(LOG_FILE, 'a', encoding='utf-8') as f:
-                f.write(f"{log_msg}\n")
-        except Exception as e:
-            tqdm.write(f"  Warning: Couldn't write to log: {e}")
+                f.write(f"{msg}\n")
+        except:
+            pass
 
 
 def load_config():
     """Load category prompts from JSON."""
-    try:
-        with open(CATEGORY_CONFIG, 'r') as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"Error loading config: {e}")
-        raise
+    with open(CATEGORY_CONFIG, 'r') as f:
+        return json.load(f)
 
 
 def image_to_base64(image_path):
@@ -99,8 +92,6 @@ def base64_to_image(base64_string):
 def call_gemini_api(prompt, input_image_path, api_key, model, aspect_ratio="1:1", image_size="4K", 
                    max_retries=3, base_delay=10):
     """Call Gemini API to generate styled image with retry logic."""
-    import time
-    
     for attempt in range(max_retries):
         try:
             api_endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
@@ -146,289 +137,257 @@ def call_gemini_api(prompt, input_image_path, api_key, model, aspect_ratio="1:1"
             if e.response.status_code == 429:
                 if attempt < max_retries - 1:
                     wait_time = base_delay * (2 ** attempt)
-                    tqdm.write(f"    ⏳ Rate limit hit, waiting {wait_time}s before retry...")
                     time.sleep(wait_time)
                     continue
                 else:
-                    raise Exception(f"Rate limit exceeded after {max_retries} attempts.")
+                    raise Exception(f"Rate limit exceeded after {max_retries} attempts")
             else:
                 raise Exception(f"HTTP {e.response.status_code}: {e}")
         except Exception as e:
             if attempt < max_retries - 1:
                 time.sleep(base_delay)
                 continue
-            raise Exception(f"API call error: {e}")
+            raise
 
 
 def get_category_prompt(config, top_cat, mid_cat, granular_cat, shot_type, product_name, state=None):
     """Navigate nested config to find category prompt and combine with base prompt."""
+    base_prompt_key = f"base_prompt_{shot_type}"
+    base_prompt = config.get(base_prompt_key, "")
+    prompt_with_product = f"Product: {product_name}. {base_prompt}"
+    
+    if shot_type in ['white', 'white-in-use']:
+        if state:
+            state_modifier = config.get(f"state_{state}", "")
+            if state_modifier:
+                return f"{prompt_with_product} STATE: {state_modifier}"
+        return prompt_with_product
+    
     try:
-        base_prompt_key = f"base_prompt_{shot_type}"
-        base_prompt = config.get(base_prompt_key, "")
-        
-        prompt_with_product = f"Product: {product_name}. {base_prompt}"
-        
-        if shot_type in ['white', 'white-in-use']:
-            if state:
-                state_key = f"state_{state}"
-                state_modifier = config.get(state_key, "")
-                if state_modifier:
-                    return f"{prompt_with_product} STATE: {state_modifier}"
-            return prompt_with_product
-        
         cat_prompt = config["categories"][top_cat][mid_cat][granular_cat]["prompt"]
         combined = f"{prompt_with_product} Setting: {cat_prompt}"
-        
-        if state:
-            state_key = f"state_{state}"
-            state_modifier = config.get(state_key, "")
-            if state_modifier:
-                combined = f"{combined} STATE: {state_modifier}"
-        
-        return combined
-        
     except KeyError:
-        tqdm.write(f"  Warning: Prompt not found for {top_cat}/{mid_cat}/{granular_cat}")
-        base_prompt_key = f"base_prompt_{shot_type}"
-        base_prompt = config.get(base_prompt_key, "")
-        return f"Product: {product_name}. {base_prompt}"
-
-
-def generate_single_variant(args):
-    """Generate a single variant - designed for parallel execution.
+        combined = prompt_with_product
     
-    Returns tuple: (success: bool, variant_info: str)
+    if state:
+        state_modifier = config.get(f"state_{state}", "")
+        if state_modifier:
+            combined = f"{combined} STATE: {state_modifier}"
+    
+    return combined
+
+
+# ============================================================================
+# Task Building - Creates manifest of all work to do
+# ============================================================================
+
+def build_generation_tasks(config, variant_counts):
     """
-    (product_path, prompt, output_path, variant_filename, api_key, model,
-     aspect_ratio, image_size, max_retries, base_delay, jpeg_quality) = args
+    Scan input folder and build complete list of generation tasks.
+    Returns list of task dicts with all info needed to generate and verify.
+    """
+    tasks = []
     
-    max_attempts = 3
-    
-    for attempt in range(1, max_attempts + 1):
-        try:
-            generated_image = call_gemini_api(
-                prompt, product_path, api_key, model,
-                aspect_ratio, image_size, max_retries, base_delay
-            )
-            
-            if generated_image is None:
-                raise Exception("API returned None")
-            
-            variant_path = os.path.join(output_path, variant_filename)
-            generated_image.save(variant_path, "JPEG", quality=jpeg_quality)
-            
-            return (True, variant_filename)
-            
-        except Exception as e:
-            if attempt < max_attempts:
-                import time
-                time.sleep(1)
-                continue
-            else:
-                return (False, f"{variant_filename}: {str(e)[:100]}")
-    
-    return (False, f"{variant_filename}: Unknown error")
-
-
-def generate_variants_parallel(product_path, prompts_dict, output_subfolder, api_key, model, 
-                               variant_counts, aspect_ratio, image_size, is_openable,
-                               max_retries, base_delay, jpeg_quality, max_workers,
-                               overall_pbar=None, category_pbar=None):
-    """Generate AI variants for single product using parallel execution."""
-    
-    successful = 0
-    failed = 0
-    
-    filename = os.path.basename(product_path)
-    
-    if ' - ' in filename:
-        sku = filename.split(' - ')[0]
-    else:
-        sku = os.path.splitext(filename)[0]
-    
-    file_ext = os.path.splitext(filename)[1]
-    
-    # Copy original
-    try:
-        original_dest = os.path.join(output_subfolder, f"{sku} - 0 Original{file_ext}")
-        shutil.copy2(product_path, original_dest)
-    except Exception as e:
-        log_error(f"Failed to copy original: {e}", f"{sku}: Failed to copy - {e}")
-    
-    # Shot types configuration
     shot_types = [
-        ('white', 'White refresh', '1', variant_counts['white']),
-        ('white-in-use', 'White in use', '2', variant_counts['white_in_use']),
-        ('room', 'Full room', '3', variant_counts['room']),
-        ('tight', 'Tight', '4', variant_counts['tight']),
-        ('cropped', 'Cropped', '5', variant_counts['cropped'])
+        ('white', 'White refresh', '1'),
+        ('white-in-use', 'White in use', '2'),
+        ('room', 'Full room', '3'),
+        ('tight', 'Tight', '4'),
+        ('cropped', 'Cropped', '5')
     ]
     
-    states = ['closed', 'open'] if is_openable else [None]
-    
-    # Build list of all variant tasks
-    tasks = []
-    for state in states:
-        for internal_type, display_name, cat_num, count in shot_types:
-            prompt = prompts_dict[internal_type][state] if is_openable else prompts_dict[internal_type]
-            
-            for variant_num in range(1, count + 1):
-                if is_openable:
-                    variant_filename = f"{sku} - {cat_num} {display_name} {state} v{variant_num}.jpg"
-                else:
-                    variant_filename = f"{sku} - {cat_num} {display_name} v{variant_num}.jpg"
-                
-                tasks.append((
-                    product_path, prompt, output_subfolder, variant_filename,
-                    api_key, model, aspect_ratio, image_size,
-                    max_retries, base_delay, jpeg_quality
-                ))
-    
-    # Execute tasks in parallel
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(generate_single_variant, task): task[3] for task in tasks}
+    for top_name in os.listdir(INPUT_FOLDER):
+        top_path = os.path.join(INPUT_FOLDER, top_name)
+        if not os.path.isdir(top_path):
+            continue
         
-        for future in as_completed(futures):
-            variant_name = futures[future]
-            try:
-                success, info = future.result()
-                if success:
-                    successful += 1
-                else:
-                    failed += 1
-                    log_error(f"Failed: {info[:50]}", f"{sku}: {info}")
-            except Exception as e:
-                failed += 1
-                log_error(f"Exception: {variant_name}", f"{sku} - {variant_name}: {e}")
+        for mid_name in os.listdir(top_path):
+            mid_path = os.path.join(top_path, mid_name)
+            if not os.path.isdir(mid_path):
+                continue
             
-            if overall_pbar:
-                overall_pbar.update(1)
-            if category_pbar:
-                category_pbar.update(1)
+            for granular_name in os.listdir(mid_path):
+                granular_path = os.path.join(mid_path, granular_name)
+                if not os.path.isdir(granular_path):
+                    continue
+                
+                # Check if openable
+                try:
+                    is_openable = config["categories"][top_name][mid_name][granular_name].get("openable", False)
+                except KeyError:
+                    is_openable = False
+                
+                # Get image files
+                image_files = [f for f in os.listdir(granular_path)
+                               if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+                
+                if TEST_MODE:
+                    image_files = image_files[:1]
+                
+                for image_file in image_files:
+                    image_path = os.path.join(granular_path, image_file)
+                    
+                    # Parse SKU and product name
+                    if ' - ' in image_file:
+                        sku = image_file.split(' - ')[0]
+                        product_name = os.path.splitext(' - '.join(image_file.split(' - ')[1:]))[0]
+                    else:
+                        sku = os.path.splitext(image_file)[0]
+                        product_name = sku
+                    
+                    # Output folder for this product
+                    output_subfolder = os.path.join(OUTPUT_FOLDER, top_name, mid_name, granular_name, sku)
+                    
+                    states = ['closed', 'open'] if is_openable else [None]
+                    
+                    for state in states:
+                        for internal_type, display_name, cat_num in shot_types:
+                            count = variant_counts[internal_type.replace('-', '_')]
+                            
+                            for variant_num in range(1, count + 1):
+                                if is_openable:
+                                    filename = f"{sku} - {cat_num} {display_name} {state} v{variant_num}.jpg"
+                                else:
+                                    filename = f"{sku} - {cat_num} {display_name} v{variant_num}.jpg"
+                                
+                                prompt = get_category_prompt(
+                                    config, top_name, mid_name, granular_name,
+                                    internal_type, product_name, state
+                                )
+                                
+                                tasks.append({
+                                    'source_image': image_path,
+                                    'output_folder': output_subfolder,
+                                    'output_filename': filename,
+                                    'output_path': os.path.join(output_subfolder, filename),
+                                    'prompt': prompt,
+                                    'sku': sku,
+                                    'category': f"{top_name}/{mid_name}/{granular_name}"
+                                })
+    
+    return tasks
+
+
+# ============================================================================
+# Generation with Tracking
+# ============================================================================
+
+def generate_single_image(task, api_key, model, aspect_ratio, image_size, 
+                          max_retries, base_delay, jpeg_quality):
+    """
+    Generate a single image. Returns (success, task, error_msg).
+    """
+    try:
+        os.makedirs(task['output_folder'], exist_ok=True)
+        
+        generated_image = call_gemini_api(
+            task['prompt'],
+            task['source_image'],
+            api_key,
+            model,
+            aspect_ratio,
+            image_size,
+            max_retries,
+            base_delay
+        )
+        
+        if generated_image is None:
+            return (False, task, "API returned None")
+        
+        generated_image.save(task['output_path'], "JPEG", quality=jpeg_quality)
+        
+        # Verify file was written
+        if not os.path.exists(task['output_path']):
+            return (False, task, "File not written")
+        
+        if os.path.getsize(task['output_path']) < 1000:
+            return (False, task, "File too small, likely corrupt")
+        
+        return (True, task, None)
+        
+    except Exception as e:
+        return (False, task, str(e)[:200])
+
+
+def run_generation_pass(tasks, api_key, model, aspect_ratio, image_size,
+                        max_retries, base_delay, jpeg_quality, max_workers,
+                        pass_name="Generation"):
+    """
+    Run generation for a list of tasks. Returns (successful_tasks, failed_tasks).
+    """
+    successful = []
+    failed = []
+    
+    if not tasks:
+        return successful, failed
+    
+    print(f"\n{pass_name}: {len(tasks)} images with {max_workers} workers")
+    
+    with tqdm(total=len(tasks), desc=pass_name, unit="img") as pbar:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    generate_single_image, task, api_key, model,
+                    aspect_ratio, image_size, max_retries, base_delay, jpeg_quality
+                ): task for task in tasks
+            }
+            
+            for future in as_completed(futures):
+                success, task, error = future.result()
+                
+                if success:
+                    successful.append(task)
+                else:
+                    failed.append(task)
+                    log_message(f"FAILED: {task['output_filename']} - {error}")
+                
+                pbar.update(1)
+                pbar.set_postfix(ok=len(successful), fail=len(failed))
     
     return successful, failed
 
 
-def process_granular_category(category_path, top_cat, mid_cat, granular_cat, config, output_path, 
-                              api_key, model, variant_counts, aspect_ratio, image_size, 
-                              max_retries, base_delay, jpeg_quality, max_workers,
-                              overall_pbar, category_pbar):
-    """Process all images in a granular category folder."""
-    total_successful = 0
-    total_failed = 0
+def copy_original_images(tasks):
+    """Copy original source images to output folders."""
+    # Group by source image to avoid duplicates
+    seen_sources = set()
     
-    image_files = [f for f in os.listdir(category_path)
-                   if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-    
-    if not image_files:
-        return 0, 0
-    
-    files_to_process = [image_files[0]] if TEST_MODE else image_files
-    
-    try:
-        is_openable = config["categories"][top_cat][mid_cat][granular_cat].get("openable", False)
-    except KeyError:
-        is_openable = False
-    
-    total_variants_per_product = sum(variant_counts.values())
-    if is_openable:
-        total_variants_per_product *= 2
-    
-    category_pbar.reset(total=len(files_to_process) * total_variants_per_product)
-    
-    for image_file in files_to_process:
-        image_path = os.path.join(category_path, image_file)
+    for task in tasks:
+        source = task['source_image']
+        if source in seen_sources:
+            continue
+        seen_sources.add(source)
         
-        if ' - ' in image_file:
-            sku = image_file.split(' - ')[0]
-            product_name = ' - '.join(image_file.split(' - ')[1:])
-            product_name = os.path.splitext(product_name)[0]
+        filename = os.path.basename(source)
+        if ' - ' in filename:
+            sku = filename.split(' - ')[0]
         else:
-            sku = os.path.splitext(image_file)[0]
-            product_name = sku
+            sku = os.path.splitext(filename)[0]
         
-        product_subfolder = os.path.join(output_path, sku)
-        os.makedirs(product_subfolder, exist_ok=True)
+        ext = os.path.splitext(filename)[1]
+        original_dest = os.path.join(task['output_folder'], f"{sku} - 0 Original{ext}")
         
-        if is_openable:
-            prompts_dict = {}
-            for shot_type in ['room', 'tight', 'cropped', 'white', 'white-in-use']:
-                prompts_dict[shot_type] = {
-                    'closed': get_category_prompt(config, top_cat, mid_cat, granular_cat, shot_type, product_name, 'closed'),
-                    'open': get_category_prompt(config, top_cat, mid_cat, granular_cat, shot_type, product_name, 'open')
-                }
-        else:
-            prompts_dict = {}
-            for shot_type in ['room', 'tight', 'cropped', 'white', 'white-in-use']:
-                prompts_dict[shot_type] = get_category_prompt(config, top_cat, mid_cat, granular_cat, shot_type, product_name)
-        
-        successful, failed = generate_variants_parallel(
-            image_path, prompts_dict, product_subfolder, 
-            api_key, model, variant_counts, 
-            aspect_ratio, image_size, is_openable,
-            max_retries, base_delay, jpeg_quality, max_workers,
-            overall_pbar, category_pbar
-        )
-        
-        total_successful += successful
-        total_failed += failed
-    
-    return total_successful, total_failed
+        try:
+            os.makedirs(task['output_folder'], exist_ok=True)
+            shutil.copy2(source, original_dest)
+        except Exception as e:
+            log_message(f"Failed to copy original {source}: {e}", also_print=True)
 
 
-def count_total_variants():
-    """Count total number of variants that will be generated."""
-    try:
-        config = load_config()
-        
-        variant_counts = {
-            'room': config["room_variants_per_image"],
-            'tight': config["tight_variants_per_image"],
-            'cropped': config["cropped_variants_per_image"],
-            'white': config["white_variants_per_image"],
-            'white_in_use': config["white_in_use_variants_per_image"]
-        }
-        
-        if TEST_MODE:
-            test_mode_variants = config["test_mode_variants_per_image"]
-            variant_counts = {k: test_mode_variants for k in variant_counts.keys()}
-        
-        total_variants_per_product = sum(variant_counts.values())
-        total_variants = 0
-        
-        for top_name in os.listdir(INPUT_FOLDER):
-            top_path = os.path.join(INPUT_FOLDER, top_name)
-            if not os.path.isdir(top_path):
-                continue
-            
-            for mid_name in os.listdir(top_path):
-                mid_path = os.path.join(top_path, mid_name)
-                if not os.path.isdir(mid_path):
-                    continue
-                
-                for granular_name in os.listdir(mid_path):
-                    granular_path = os.path.join(mid_path, granular_name)
-                    if not os.path.isdir(granular_path):
-                        continue
-                    
-                    try:
-                        is_openable = config["categories"][top_name][mid_name][granular_name].get("openable", False)
-                    except KeyError:
-                        is_openable = False
-                    
-                    image_files = [f for f in os.listdir(granular_path)
-                                   if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-                    
-                    if image_files:
-                        products_count = 1 if TEST_MODE else len(image_files)
-                        variants = total_variants_per_product * 2 if is_openable else total_variants_per_product
-                        total_variants += products_count * variants
-        
-        return total_variants
-        
-    except Exception as e:
-        print(f"Error counting variants: {e}")
-        return 0
+def verify_all_outputs(tasks):
+    """
+    Check which expected outputs exist. Returns (existing, missing).
+    """
+    existing = []
+    missing = []
+    
+    for task in tasks:
+        if os.path.exists(task['output_path']) and os.path.getsize(task['output_path']) > 1000:
+            existing.append(task)
+        else:
+            missing.append(task)
+    
+    return existing, missing
 
 
 def flatten_structure():
@@ -442,32 +401,61 @@ def flatten_structure():
     
     os.makedirs(FLAT_OUTPUT_FOLDER, exist_ok=True)
     
-    img_extensions = (".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff")
-    seen_names = {}
-    total_copied = 0
+    img_extensions = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff"}
+    all_images = []
     
     for root, _, files in os.walk(OUTPUT_FOLDER):
         for filename in files:
-            if filename.lower().endswith(img_extensions):
-                src_path = os.path.join(root, filename)
-                
-                name, ext = os.path.splitext(filename)
-                count = seen_names.get(filename, 0)
-                seen_names[filename] = count + 1
-                
-                new_name = filename if count == 0 else f"{name}_{count}{ext}"
-                dst_path = os.path.join(FLAT_OUTPUT_FOLDER, new_name)
-                
-                shutil.copy2(src_path, dst_path)
-                total_copied += 1
+            if os.path.splitext(filename)[1].lower() in img_extensions:
+                all_images.append(os.path.join(root, filename))
     
-    print(f"\n✔ Copied {total_copied} images to {FLAT_OUTPUT_FOLDER}/")
+    print(f"Found {len(all_images)} images to flatten")
+    
+    # Check for duplicate filenames
+    filenames = [os.path.basename(p) for p in all_images]
+    seen = {}
+    for f in filenames:
+        seen[f] = seen.get(f, 0) + 1
+    duplicates = [f for f, count in seen.items() if count > 1]
+    
+    if duplicates:
+        print(f"⚠ WARNING: {len(duplicates)} duplicate filenames!")
+        for dup in duplicates[:10]:
+            print(f"  - {dup}")
+    
+    copied = 0
+    failed = 0
+    
+    for src_path in all_images:
+        filename = os.path.basename(src_path)
+        dst_path = os.path.join(FLAT_OUTPUT_FOLDER, filename)
+        
+        try:
+            shutil.copy2(src_path, dst_path)
+            copied += 1
+        except Exception as e:
+            print(f"  ✗ Failed to copy {filename}: {e}")
+            failed += 1
+    
+    print(f"\n✓ Copied {copied} images to {FLAT_OUTPUT_FOLDER}/")
+    if failed:
+        print(f"✗ Failed to copy {failed} images")
+    
+    final_count = len(os.listdir(FLAT_OUTPUT_FOLDER))
+    if final_count != len(all_images):
+        print(f"⚠ WARNING: Source had {len(all_images)}, destination has {final_count}")
+    else:
+        print(f"✓ Verified: {final_count} images in flat folder")
 
+
+# ============================================================================
+# Main
+# ============================================================================
 
 def main():
-    """Main generation workflow."""
+    """Main generation workflow with verification and retry."""
     print("="*60)
-    print("AI Image Generation Pipeline - Step 2 (PARALLEL)")
+    print("AI Image Generation Pipeline (with Verification & Retry)")
     print("="*60)
     
     if GEMINI_API_KEY is None:
@@ -475,153 +463,140 @@ def main():
     
     if not os.path.exists(INPUT_FOLDER):
         print(f"\n✗ ERROR: Input folder '{INPUT_FOLDER}' not found")
-        print("Run scraper.py first to create product images")
         return
     
+    # Clear log
     if os.path.exists(LOG_FILE):
         os.remove(LOG_FILE)
     
+    # Clear output
     if os.path.exists(OUTPUT_FOLDER):
         print(f"\nDeleting existing folder: {OUTPUT_FOLDER}/")
         shutil.rmtree(OUTPUT_FOLDER)
-    
     os.makedirs(OUTPUT_FOLDER, exist_ok=True)
-    print(f"Created fresh output folder: {OUTPUT_FOLDER}/\n")
+    
+    # Load config
+    config = load_config()
     
     model = GEMINI_MODEL_TEST if TEST_MODE else GEMINI_MODEL_PRODUCTION
+    aspect_ratio = config["aspect_ratio"]
+    image_size = config["image_size"]
+    max_retries = config["api_retry_max_attempts"]
+    base_delay = config["api_retry_base_delay_seconds"]
+    jpeg_quality = config["jpeg_quality"]
+    max_workers = config.get("max_parallel_requests", 5)
     
-    try:
-        config = load_config()
-        
+    # Build variant counts
+    if TEST_MODE:
+        test_variants = config["test_mode_variants_per_image"]
         variant_counts = {
+            'white': test_variants,
+            'white_in_use': test_variants,
+            'room': test_variants,
+            'tight': test_variants,
+            'cropped': test_variants
+        }
+    else:
+        variant_counts = {
+            'white': config["white_variants_per_image"],
+            'white_in_use': config["white_in_use_variants_per_image"],
             'room': config["room_variants_per_image"],
             'tight': config["tight_variants_per_image"],
-            'cropped': config["cropped_variants_per_image"],
-            'white': config["white_variants_per_image"],
-            'white_in_use': config["white_in_use_variants_per_image"]
+            'cropped': config["cropped_variants_per_image"]
         }
-        
-        aspect_ratio = config["aspect_ratio"]
-        image_size = config["image_size"]
-        max_retries = config["api_retry_max_attempts"]
-        base_delay = config["api_retry_base_delay_seconds"]
-        jpeg_quality = config["jpeg_quality"]
-        test_mode_variants = config["test_mode_variants_per_image"]
-        
-        # NEW: Configurable parallelism (default 5 if not in config)
-        max_workers = config.get("max_parallel_requests", 5)
-        
-        if TEST_MODE:
-            variant_counts = {k: test_mode_variants for k in variant_counts.keys()}
-        
-        total_per_product = sum(variant_counts.values())
-        
-        print(f"Loaded configuration from {CATEGORY_CONFIG}")
-        print(f"Model: {model}")
-        print(f"Mode: {'TEST' if TEST_MODE else 'PRODUCTION'}")
-        print(f"Resolution: {image_size} ({aspect_ratio})")
-        print(f"JPEG Quality: {jpeg_quality}")
-        print(f"Parallel requests: {max_workers} concurrent")
-        print(f"API Retry: {max_retries} attempts, {base_delay}s base delay")
-        print(f"Variants per image:")
-        print(f"  Room shots: {variant_counts['room']}")
-        print(f"  Tight shots: {variant_counts['tight']}")
-        print(f"  Cropped shots: {variant_counts['cropped']}")
-        print(f"  White refresh: {variant_counts['white']}")
-        print(f"  White in-use: {variant_counts['white_in_use']}")
-        print(f"  Total per product: {total_per_product}")
-        if TEST_MODE:
-            print(f"  (Test mode: {test_mode_variants} variant per type)")
-        print(f"  (Doubled for openable products)")
-        print(f"\n⚠️ Do not close this window during generation!")
-        
-        if TEST_MODE:
-            print(f"{'!'*60}")
-            print("TEST MODE - Processing 1 product per category")
-            print(f"Running {max_workers} parallel requests for speed")
-            print(f"{'!'*60}\n")
-        
-    except Exception as e:
-        print(f"\n✗ ERROR: {e}")
-        return
     
-    grand_total_successful = 0
-    grand_total_failed = 0
+    print(f"\nMode: {'TEST' if TEST_MODE else 'PRODUCTION'}")
+    print(f"Model: {model}")
+    print(f"Parallel workers: {max_workers}")
+    print(f"Max retry rounds: {MAX_RETRY_ROUNDS}")
     
-    print("Counting images to process...")
-    total_variants = count_total_variants()
-    print(f"Total variants to generate: {total_variants}\n")
+    # Build complete task manifest
+    print("\nBuilding task manifest...")
+    all_tasks = build_generation_tasks(config, variant_counts)
+    print(f"Total images to generate: {len(all_tasks)}")
     
-    overall_pbar = tqdm(total=total_variants, desc="Overall Progress", position=0, leave=True, unit="variant")
-    category_pbar = tqdm(total=0, desc="Current Category", position=1, leave=False, unit="variant")
+    # Copy originals
+    print("\nCopying original images...")
+    copy_original_images(all_tasks)
     
-    try:
-        for top_name in os.listdir(INPUT_FOLDER):
-            top_path = os.path.join(INPUT_FOLDER, top_name)
-            if not os.path.isdir(top_path):
-                continue
-            
-            tqdm.write(f"\n{'='*60}")
-            tqdm.write(f"Processing: {top_name}")
-            tqdm.write(f"{'='*60}")
-            
-            for mid_name in os.listdir(top_path):
-                mid_path = os.path.join(top_path, mid_name)
-                if not os.path.isdir(mid_path):
-                    continue
-                
-                tqdm.write(f"\n  {mid_name}")
-                
-                for granular_name in os.listdir(mid_path):
-                    granular_path = os.path.join(mid_path, granular_name)
-                    if not os.path.isdir(granular_path):
-                        continue
-                    
-                    output_path = os.path.join(OUTPUT_FOLDER, top_name, mid_name, granular_name)
-                    os.makedirs(output_path, exist_ok=True)
-                    
-                    category_pbar.set_description(f"Current: {granular_name[:30]}")
-                    
-                    successful, failed = process_granular_category(
-                        granular_path, top_name, mid_name, granular_name,
-                        config, output_path, GEMINI_API_KEY, model, 
-                        variant_counts, aspect_ratio, image_size,
-                        max_retries, base_delay, jpeg_quality, max_workers,
-                        overall_pbar, category_pbar
-                    )
-                    
-                    grand_total_successful += successful
-                    grand_total_failed += failed
+    # Initial generation pass
+    successful, failed = run_generation_pass(
+        all_tasks, GEMINI_API_KEY, model, aspect_ratio, image_size,
+        max_retries, base_delay, jpeg_quality, max_workers,
+        pass_name="Initial Generation"
+    )
     
-    finally:
-        category_pbar.close()
-        overall_pbar.close()
+    # Retry failed tasks
+    retry_round = 1
+    while failed and retry_round <= MAX_RETRY_ROUNDS:
+        print(f"\n{'='*60}")
+        print(f"RETRY ROUND {retry_round}/{MAX_RETRY_ROUNDS} - {len(failed)} images to retry")
+        print(f"{'='*60}")
+        
+        # Small delay before retry
+        time.sleep(5)
+        
+        retry_successful, still_failed = run_generation_pass(
+            failed, GEMINI_API_KEY, model, aspect_ratio, image_size,
+            max_retries, base_delay, jpeg_quality, max_workers,
+            pass_name=f"Retry Round {retry_round}"
+        )
+        
+        successful.extend(retry_successful)
+        failed = still_failed
+        retry_round += 1
     
+    # Final verification
+    print("\n" + "="*60)
+    print("FINAL VERIFICATION")
+    print("="*60)
+    
+    verified, missing = verify_all_outputs(all_tasks)
+    
+    print(f"Expected: {len(all_tasks)}")
+    print(f"Verified: {len(verified)}")
+    print(f"Missing:  {len(missing)}")
+    
+    if missing:
+        print("\nMissing files:")
+        for task in missing[:20]:
+            print(f"  - {task['output_filename']}")
+        if len(missing) > 20:
+            print(f"  ... and {len(missing) - 20} more")
+        
+        # Write missing files to log
+        log_message("\n=== MISSING FILES ===")
+        for task in missing:
+            log_message(f"MISSING: {task['output_path']}")
+    
+    # Flatten
     flatten_structure()
     
-    total_variants = grand_total_successful + grand_total_failed
-    success_rate = (grand_total_successful / total_variants * 100) if total_variants > 0 else 0
+    # Summary
+    success_rate = (len(verified) / len(all_tasks) * 100) if all_tasks else 0
     
     summary = f"""
 {'='*60}
 GENERATION COMPLETE
 {'='*60}
-Successfully generated: {grand_total_successful} / {total_variants} ({success_rate:.1f}%)
-Failed: {grand_total_failed}
-Hierarchical images: {OUTPUT_FOLDER}/
-Flat dump: {FLAT_OUTPUT_FOLDER}/
-Error log: {LOG_FILE}
+Total expected:    {len(all_tasks)}
+Successfully made: {len(verified)} ({success_rate:.1f}%)
+Still missing:     {len(missing)}
 
-done :)
+Hierarchical: {OUTPUT_FOLDER}/
+Flat dump:    {FLAT_OUTPUT_FOLDER}/
+Error log:    {LOG_FILE}
 {'='*60}
 """
     print(summary)
+    log_message(summary)
     
-    try:
-        with open(LOG_FILE, 'a', encoding='utf-8') as f:
-            f.write(f"\n{summary}")
-    except Exception as e:
-        print(f"Warning: Couldn't write summary to log: {e}")
+    if missing:
+        print("⚠ Some images failed - check generation_log.txt for details")
+        return False
+    else:
+        print("✓ All images generated successfully!")
+        return True
 
 
 if __name__ == "__main__":

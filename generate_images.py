@@ -1,290 +1,127 @@
 """
-AI Image Generation Pipeline - Step 2
-Generates styled lifestyle product images using Gemini Image Generation API.
+AI Image Generation Pipeline - BATCH API VERSION
+50% cheaper! $0.12/image instead of $0.24/image for 4K
 
-UPDATED:
-- MOVED: All config settings from JSON to this file
-- ADDED: "Fitted" white variants with dynamic aspect ratio selection
-- ADDED: Analyzes input image to pick best aspect ratio for product
+REQUIRES: pip install google-genai
+
+Trade-off: Results in up to 24 hours (usually faster)
 """
 
 import os
 import json
 import base64
 import shutil
-import requests
-from pathlib import Path
+import time
+from datetime import datetime
 from PIL import Image
 from io import BytesIO
 from tqdm import tqdm
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import threading
-import time
+
+# Use official Google SDK for proper large file handling
+from google import genai
+from google.genai import types
 
 # ============================================================================
-# CONFIGURATION - All settings in one place
+# CONFIGURATION
 # ============================================================================
 
-# --- Mode Settings ---
-TEST_MODE = False  # True = 1 variant per type, False = full production!
+TEST_MODE = False
+GEMINI_MODEL = "gemini-3-pro-image-preview"
 
-# --- API Settings ---
-GEMINI_MODEL = "gemini-3-pro-image-preview" # Current cutting edge
-MAX_PARALLEL_REQUESTS = 10
-API_RETRY_MAX_ATTEMPTS = 3
-API_RETRY_BASE_DELAY_SECONDS = 10
+DEFAULT_ASPECT_RATIO = "1:1"
+DEFAULT_IMAGE_SIZE = "4K"
+JPEG_QUALITY = 95
 
-# --- Output Settings ---
-DEFAULT_ASPECT_RATIO = "1:1"  # For all shots except fitted variants
-DEFAULT_IMAGE_SIZE = "4K"     # Options: "1K", "2K", "4K" (must be uppercase!)
-JPEG_QUALITY = 95             # PIL save quality (0-100, higher = better)
-
-# --- Variant Counts (Production Mode) ---
 VARIANTS_PRODUCTION = {
-    'white': 1,
-    'white_in_use': 2,
-    'white_fitted': 1,           # NEW: Fitted aspect ratio white shot
-    'white_in_use_fitted': 2,    # NEW: Fitted aspect ratio white-in-use
-    'room': 2,
-    'tight': 5,
-    'cropped': 3,
+    'white': 1, 'white_in_use': 2, 'white_fitted': 1,
+    'white_in_use_fitted': 2, 'room': 2, 'tight': 5, 'cropped': 3,
 }
-
-# --- Variant Counts (Test Mode) - All set to 1 ---
 VARIANTS_TEST = {k: 1 for k in VARIANTS_PRODUCTION.keys()}
 
-# --- Supported Aspect Ratios (Gemini API) ---
-# These are the ONLY valid aspect ratios - API rejects others
-SUPPORTED_ASPECT_RATIOS = [
-    "1:1",    # Square
-    "2:3",    # Portrait
-    "3:2",    # Landscape
-    "3:4",    # Portrait
-    "4:3",    # Landscape  
-    "4:5",    # Portrait (Instagram)
-    "5:4",    # Landscape
-    "9:16",   # Tall portrait (Stories)
-    "16:9",   # Widescreen
-    "21:9",   # Ultra-wide
-]
+SUPPORTED_ASPECT_RATIOS = ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"]
 
-# --- Retry Settings ---
-MAX_RETRY_ROUNDS = 3  # Full retry passes for failed images
-
-# --- Folder Settings ---
 INPUT_FOLDER = "aquateak_products"
 OUTPUT_FOLDER = "generated_images"
 FLAT_OUTPUT_FOLDER = "all_generated"
-os.makedirs("logs", exist_ok=True)
-LOG_FILE = "logs/generation_log.txt"
+BATCH_FOLDER = "batch_jobs"
+SHOT_PROMPTS_FILE = "shot_prompts.json"
+CATEGORY_PROMPTS_FILE = "category_prompts.json"
 
-# --- Prompt Config Files ---
-SHOT_PROMPTS_FILE = "shot_prompts.json"       # Base prompts + state modifiers
-CATEGORY_PROMPTS_FILE = "category_prompts.json"  # Category scene descriptions
-
-# ============================================================================
-# Thread-safe logging
-# ============================================================================
-
-log_lock = threading.Lock()
-
-def log_message(msg, also_print=False):
-    """Log message to file (thread-safe)."""
-    if also_print:
-        tqdm.write(msg)
-    with log_lock:
-        try:
-            with open(LOG_FILE, 'a', encoding='utf-8') as f:
-                f.write(f"{msg}\n")
-        except:
-            pass
+os.makedirs(BATCH_FOLDER, exist_ok=True)
 
 # ============================================================================
-# API Key Loading
+# API Setup
 # ============================================================================
 
 def load_api_key():
-    """Load API key from apikey.txt file."""
     try:
-        with open('apikey.txt', 'r') as f:
+        with open('apikey.txt') as f:
             return f.read().strip()
-    except FileNotFoundError:
-        print("\n✗ ERROR: apikey.txt not found!")
-        print("Create a file named 'apikey.txt' in the current directory")
-        print("Get your API key from: https://aistudio.google.com/apikey")
-        return None
-    except Exception as e:
-        print(f"\n✗ ERROR: Could not read apikey.txt: {e}")
+    except:
+        print("✗ apikey.txt not found!")
         return None
 
-GEMINI_API_KEY = load_api_key()
+API_KEY = load_api_key()
+
+# Initialize the official client
+client = genai.Client(api_key=API_KEY) if API_KEY else None
 
 # ============================================================================
-# Aspect Ratio Analysis
+# Helpers
 # ============================================================================
 
-def get_image_aspect_ratio(image_path):
-    """Get the aspect ratio of an image as width/height."""
+def find_best_ar(path):
     try:
-        with Image.open(image_path) as img:
-            width, height = img.size
-            return width / height
-    except Exception as e:
-        log_message(f"Could not read image dimensions: {image_path} - {e}")
-        return 1.0  # Default to square
-
-def find_best_aspect_ratio(image_path):
-    """
-    Analyze input image and find the closest supported Gemini aspect ratio.
-    This allows "fitted" shots that match the product's natural proportions.
-    """
-    actual_ratio = get_image_aspect_ratio(image_path)
-    
-    # Convert supported ratios to decimal values
-    ratio_map = {}
-    for ratio_str in SUPPORTED_ASPECT_RATIOS:
-        w, h = map(int, ratio_str.split(':'))
-        ratio_map[ratio_str] = w / h
-    
-    # Find closest match
-    best_ratio = "1:1"
-    best_diff = float('inf')
-    
-    for ratio_str, ratio_val in ratio_map.items():
-        diff = abs(actual_ratio - ratio_val)
-        if diff < best_diff:
-            best_diff = diff
-            best_ratio = ratio_str
-    
-    return best_ratio
-
-# ============================================================================
-# Helper Functions
-# ============================================================================
+        with Image.open(path) as img:
+            r = img.size[0] / img.size[1]
+    except:
+        return "1:1"
+    best, best_d = "1:1", 999
+    for ar in SUPPORTED_ASPECT_RATIOS:
+        w, h = map(int, ar.split(':'))
+        d = abs(r - w/h)
+        if d < best_d:
+            best, best_d = ar, d
+    return best
 
 def load_config():
-    """Load both prompt config files."""
-    with open(SHOT_PROMPTS_FILE, 'r') as f:
-        shot_config = json.load(f)
-    with open(CATEGORY_PROMPTS_FILE, 'r') as f:
-        category_config = json.load(f)
-    return shot_config, category_config
+    with open(SHOT_PROMPTS_FILE) as f:
+        shot = json.load(f)
+    with open(CATEGORY_PROMPTS_FILE) as f:
+        cat = json.load(f)
+    return shot, cat
 
-def image_to_base64(image_path):
-    """Convert image to base64."""
-    with open(image_path, 'rb') as img_file:
-        return base64.b64encode(img_file.read()).decode('utf-8')
+def file_ok(path):
+    return os.path.exists(path) and os.path.getsize(path) > 1000
 
-def base64_to_image(base64_string):
-    """Convert base64 to PIL Image."""
-    image_data = base64.b64decode(base64_string)
-    return Image.open(BytesIO(image_data))
+def image_to_base64(path):
+    with open(path, 'rb') as f:
+        return base64.b64encode(f.read()).decode()
 
-def call_gemini_api(prompt, input_image_path, api_key, model, aspect_ratio="1:1", 
-                   image_size="4K", max_retries=3, base_delay=10):
-    """Call Gemini API to generate styled image with retry logic."""
-    for attempt in range(max_retries):
+def get_prompt(shot_cfg, cat_cfg, top, mid, gran, shot_type, product, state=None):
+    base = shot_cfg.get("base_prompts", {}).get(shot_type, "")
+    p = f"Product: {product}. {base}"
+    
+    if shot_type not in ['white', 'white-in-use', 'white-fitted', 'white-in-use-fitted']:
         try:
-            api_endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-            image_base64 = image_to_base64(input_image_path)
-            
-            headers = {
-                "x-goog-api-key": api_key,
-                "Content-Type": "application/json"
-            }
-            
-            # Build image config
-            image_config = {"aspectRatio": aspect_ratio}
-            if "gemini-3" in model:
-                image_config["imageSize"] = image_size
-            
-            body = {
-                "contents": [{
-                    "parts": [
-                        {"text": prompt},
-                        {"inline_data": {"mime_type": "image/jpeg", "data": image_base64}}
-                    ]
-                }],
-                "generationConfig": {
-                    "responseModalities": ["TEXT", "IMAGE"],
-                    "imageConfig": image_config
-                }
-            }
-            
-            response = requests.post(api_endpoint, headers=headers, json=body, timeout=120)
-            response.raise_for_status()
-            result = response.json()
-            
-            if "candidates" in result and len(result["candidates"]) > 0:
-                parts = result["candidates"][0].get("content", {}).get("parts", [])
-                for part in parts:
-                    if "inlineData" in part:
-                        image_data = part["inlineData"].get("data")
-                        if image_data:
-                            return base64_to_image(image_data)
-            
-            raise Exception("No image data in API response")
-            
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 429:
-                if attempt < max_retries - 1:
-                    wait_time = base_delay * (2 ** attempt)
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    raise Exception(f"Rate limit exceeded after {max_retries} attempts")
-            else:
-                raise Exception(f"HTTP {e.response.status_code}: {e}")
-        except Exception as e:
-            if attempt < max_retries - 1:
-                time.sleep(base_delay)
-                continue
-            raise
-
-def get_category_prompt(shot_config, category_config, top_cat, mid_cat, granular_cat, shot_type, product_name, state=None):
-    """Combine base prompt + category prompt + state modifier into final prompt."""
-    # Get base prompt for shot type
-    base_prompts = shot_config.get("base_prompts", {})
-    base_prompt = base_prompts.get(shot_type, "")
-    prompt_with_product = f"Product: {product_name}. {base_prompt}"
-    
-    # White shots (including fitted) skip category prompts
-    if shot_type in ['white', 'white-in-use', 'white-fitted', 'white-in-use-fitted']:
-        if state:
-            state_modifiers = shot_config.get("state_modifiers", {})
-            state_modifier = state_modifiers.get(state, "")
-            if state_modifier:
-                return f"{prompt_with_product} STATE: {state_modifier}"
-        return prompt_with_product
-    
-    # Add category-specific setting for room/tight/cropped
-    try:
-        cat_prompt = category_config["categories"][top_cat][mid_cat][granular_cat]["prompt"]
-        combined = f"{prompt_with_product} Setting: {cat_prompt}"
-    except KeyError:
-        combined = prompt_with_product
+            p = f"{p} Setting: {cat_cfg['categories'][top][mid][gran]['prompt']}"
+        except KeyError:
+            pass
     
     if state:
-        state_modifiers = shot_config.get("state_modifiers", {})
-        state_modifier = state_modifiers.get(state, "")
-        if state_modifier:
-            combined = f"{combined} STATE: {state_modifier}"
-    
-    return combined
+        mod = shot_cfg.get("state_modifiers", {}).get(state, "")
+        if mod:
+            p = f"{p} STATE: {mod}"
+    return p
 
 # ============================================================================
 # Task Building
 # ============================================================================
 
-def build_generation_tasks(shot_config, category_config, variant_counts):
-    """
-    Scan input folder and build complete list of generation tasks.
-    Now includes fitted variants with dynamic aspect ratio.
-    """
-    tasks = []
+def build_tasks(shot_cfg, cat_cfg, variants):
+    tasks, skipped = [], 0
     
-    # Shot types: (internal_type, display_name, category_number, is_fitted)
-    shot_types = [
+    shots = [
         ('white', 'White refresh', '1', False),
         ('white-fitted', 'White fitted', '1A', True),
         ('white-in-use', 'White in use', '2', False),
@@ -294,348 +131,479 @@ def build_generation_tasks(shot_config, category_config, variant_counts):
         ('cropped', 'Cropped', '5', False),
     ]
     
-    for top_name in os.listdir(INPUT_FOLDER):
-        top_path = os.path.join(INPUT_FOLDER, top_name)
-        if not os.path.isdir(top_path):
-            continue
-        
-        for mid_name in os.listdir(top_path):
-            mid_path = os.path.join(top_path, mid_name)
-            if not os.path.isdir(mid_path):
-                continue
-            
-            for granular_name in os.listdir(mid_path):
-                granular_path = os.path.join(mid_path, granular_name)
-                if not os.path.isdir(granular_path):
-                    continue
+    for top in os.listdir(INPUT_FOLDER):
+        tp = os.path.join(INPUT_FOLDER, top)
+        if not os.path.isdir(tp): continue
+        for mid in os.listdir(tp):
+            mp = os.path.join(tp, mid)
+            if not os.path.isdir(mp): continue
+            for gran in os.listdir(mp):
+                gp = os.path.join(mp, gran)
+                if not os.path.isdir(gp): continue
                 
-                # Check if openable
                 try:
-                    is_openable = category_config["categories"][top_name][mid_name][granular_name].get("openable", False)
-                except KeyError:
-                    is_openable = False
+                    openable = cat_cfg["categories"][top][mid][gran].get("openable", False)
+                except:
+                    openable = False
                 
-                # Get image files
-                image_files = [f for f in os.listdir(granular_path)
-                               if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+                files = [f for f in os.listdir(gp) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+                if TEST_MODE: files = files[:1]
                 
-                if TEST_MODE:
-                    image_files = image_files[:1]
-                
-                for image_file in image_files:
-                    image_path = os.path.join(granular_path, image_file)
+                for img_file in files:
+                    img_path = os.path.join(gp, img_file)
+                    fitted_ar = find_best_ar(img_path)
                     
-                    # Pre-compute fitted aspect ratio for this image
-                    fitted_aspect_ratio = find_best_aspect_ratio(image_path)
+                    sku = img_file.split(' - ')[0] if ' - ' in img_file else os.path.splitext(img_file)[0]
+                    product = os.path.splitext(' - '.join(img_file.split(' - ')[1:]))[0] if ' - ' in img_file else sku
                     
-                    # Parse SKU and product name
-                    if ' - ' in image_file:
-                        sku = image_file.split(' - ')[0]
-                        product_name = os.path.splitext(' - '.join(image_file.split(' - ')[1:]))[0]
-                    else:
-                        sku = os.path.splitext(image_file)[0]
-                        product_name = sku
-                    
-                    output_subfolder = os.path.join(OUTPUT_FOLDER, top_name, mid_name, granular_name, sku)
-                    states = ['closed', 'open'] if is_openable else [None]
+                    out_dir = os.path.join(OUTPUT_FOLDER, top, mid, gran, sku)
+                    states = ['closed', 'open'] if openable else [None]
                     
                     for state in states:
-                        for internal_type, display_name, cat_num, is_fitted in shot_types:
-                            # Get variant count (convert hyphens to underscores for dict key)
-                            count_key = internal_type.replace('-', '_')
-                            count = variant_counts.get(count_key, 0)
-                            
-                            if count == 0:
-                                continue
-                            
-                            for variant_num in range(1, count + 1):
-                                # Build filename
-                                if is_openable:
-                                    filename = f"{sku} - {cat_num} {display_name} {state} v{variant_num}.jpg"
-                                else:
-                                    filename = f"{sku} - {cat_num} {display_name} v{variant_num}.jpg"
+                        for internal, display, num, fitted in shots:
+                            cnt = variants.get(internal.replace('-', '_'), 0)
+                            for v in range(1, cnt + 1):
+                                fname = f"{sku} - {num} {display}{' ' + state if state else ''} v{v}.jpg"
+                                out_path = os.path.join(out_dir, fname)
                                 
-                                # Determine aspect ratio
-                                if is_fitted:
-                                    aspect_ratio = fitted_aspect_ratio
-                                else:
-                                    aspect_ratio = DEFAULT_ASPECT_RATIO
-                                
-                                prompt = get_category_prompt(
-                                    shot_config, category_config, top_name, mid_name, granular_name,
-                                    internal_type, product_name, state
-                                )
+                                if file_ok(out_path):
+                                    skipped += 1
+                                    continue
                                 
                                 tasks.append({
-                                    'source_image': image_path,
-                                    'output_folder': output_subfolder,
-                                    'output_filename': filename,
-                                    'output_path': os.path.join(output_subfolder, filename),
-                                    'prompt': prompt,
-                                    'aspect_ratio': aspect_ratio,
+                                    'src': img_path,
+                                    'out_dir': out_dir,
+                                    'out': out_path,
+                                    'fname': fname,
+                                    'prompt': get_prompt(shot_cfg, cat_cfg, top, mid, gran, internal, product, state),
+                                    'ar': fitted_ar if fitted else DEFAULT_ASPECT_RATIO,
                                     'sku': sku,
-                                    'category': f"{top_name}/{mid_name}/{granular_name}",
-                                    'is_fitted': is_fitted,
                                 })
+    return tasks, skipped
+
+# ============================================================================
+# Batch API using Official SDK
+# ============================================================================
+
+def create_batch_request(task, request_id):
+    """Create request object for batch."""
+    img_b64 = image_to_base64(task['src'])
     
-    return tasks
+    return {
+        "key": request_id,
+        "request": {
+            "model": f"models/{GEMINI_MODEL}",
+            "contents": [{
+                "parts": [
+                    {"text": task['prompt']},
+                    {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}
+                ]
+            }],
+            "generationConfig": {
+                "responseModalities": ["TEXT", "IMAGE"],
+                "imageConfig": {
+                    "aspectRatio": task['ar'],
+                    "imageSize": DEFAULT_IMAGE_SIZE
+                }
+            }
+        }
+    }
 
-# ============================================================================
-# Generation
-# ============================================================================
+def write_batch_jsonl(tasks, output_file):
+    """Write all tasks to JSONL file."""
+    print(f"\nCreating batch request file: {output_file}")
+    
+    with open(output_file, 'w') as f:
+        for i, task in enumerate(tqdm(tasks, desc="Building JSONL")):
+            request = create_batch_request(task, str(i))
+            f.write(json.dumps(request) + '\n')
+    
+    size_mb = os.path.getsize(output_file) / (1024 * 1024)
+    print(f"✓ Created {output_file} ({size_mb:.1f} MB)")
+    return output_file
 
-def generate_single_image(task, api_key, model, image_size, max_retries, base_delay, jpeg_quality):
-    """Generate a single image. Returns (success, task, error_msg)."""
+def upload_file_resumable(filepath):
+    """Upload large file using official SDK with resumable upload."""
+    print(f"\nUploading {filepath} (this may take a few minutes for large files)...")
+    
     try:
-        os.makedirs(task['output_folder'], exist_ok=True)
-        
-        generated_image = call_gemini_api(
-            task['prompt'],
-            task['source_image'],
-            api_key,
-            model,
-            task['aspect_ratio'],  # Use task-specific aspect ratio
-            image_size,
-            max_retries,
-            base_delay
+        # Official SDK handles resumable upload automatically
+        uploaded_file = client.files.upload(
+            file=filepath,
+            config=types.UploadFileConfig(
+                mime_type="application/jsonl",
+                display_name=os.path.basename(filepath)
+            )
         )
         
-        if generated_image is None:
-            return (False, task, "API returned None")
-        
-        generated_image.save(task['output_path'], "JPEG", quality=jpeg_quality)
-        
-        if not os.path.exists(task['output_path']):
-            return (False, task, "File not written")
-        
-        if os.path.getsize(task['output_path']) < 1000:
-            return (False, task, "File too small, likely corrupt")
-        
-        return (True, task, None)
+        print(f"✓ Uploaded: {uploaded_file.name}")
+        print(f"  URI: {uploaded_file.uri}")
+        return uploaded_file.name
         
     except Exception as e:
-        return (False, task, str(e)[:200])
+        print(f"✗ Upload failed: {e}")
+        return None
 
-def run_generation_pass(tasks, api_key, model, image_size, max_retries, base_delay, 
-                        jpeg_quality, max_workers, pass_name="Generation"):
-    """Run generation for a list of tasks. Returns (successful_tasks, failed_tasks)."""
-    successful = []
-    failed = []
+def submit_batch_job(input_file_name):
+    """Submit batch job."""
+    print(f"\nSubmitting batch job...")
     
-    if not tasks:
-        return successful, failed
+    try:
+        batch_job = client.batches.create(
+            model=GEMINI_MODEL,
+            src=types.BatchJobSource(file_name=input_file_name),
+            config=types.CreateBatchJobConfig(
+                display_name=f"product-images-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            )
+        )
+        
+        print(f"✓ Batch job created: {batch_job.name}")
+        return batch_job.name
+        
+    except Exception as e:
+        print(f"✗ Batch submit failed: {e}")
+        return None
+
+def poll_batch_status(batch_name):
+    """Poll until complete with progress updates."""
+    print(f"\nPolling batch status...")
+    print("(Can take 1-24 hours. You can Ctrl+C and check later)")
+    print(f"To check later: python generate_images_batch.py --check {batch_name}\n")
     
-    print(f"\n{pass_name}: {len(tasks)} images with {max_workers} workers")
-    
-    with tqdm(total=len(tasks), desc=pass_name, unit="img") as pbar:
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(
-                    generate_single_image, task, api_key, model,
-                    image_size, max_retries, base_delay, jpeg_quality
-                ): task for task in tasks
-            }
+    while True:
+        try:
+            batch = client.batches.get(name=batch_name)
             
-            for future in as_completed(futures):
-                success, task, error = future.result()
+            state = batch.state.name if hasattr(batch.state, 'name') else str(batch.state)
+            
+            # Try to get progress counts
+            succeeded = getattr(batch, 'succeeded_count', '?')
+            failed = getattr(batch, 'failed_count', '?')
+            total = getattr(batch, 'total_count', '?')
+            
+            print(f"  {datetime.now().strftime('%H:%M:%S')} | Status: {state} | Done: {succeeded}/{total} | Failed: {failed}")
+            
+            if 'SUCCEEDED' in state:
+                print("\n✓ Batch job completed!")
+                return batch
+            elif 'FAILED' in state:
+                print("\n✗ Batch job failed!")
+                return None
+            elif 'CANCELLED' in state:
+                print("\n✗ Batch job cancelled")
+                return None
+            
+            time.sleep(60)
+            
+        except Exception as e:
+            print(f"  Status check error: {e}")
+            time.sleep(60)
+
+def download_results(batch, tasks):
+    """Download generated images from completed batch."""
+    print("\nDownloading results...")
+    
+    try:
+        # Get the destination file
+        dest_file = batch.dest.file_name if hasattr(batch, 'dest') else None
+        
+        if not dest_file:
+            print("No output file in batch result")
+            return 0, len(tasks)
+        
+        # Download the results file
+        print(f"Downloading {dest_file}...")
+        
+        # Read results - the SDK should give us the content
+        results_content = client.files.download(name=dest_file)
+        
+        success = 0
+        failed = 0
+        
+        for line in results_content.strip().split('\n'):
+            try:
+                result = json.loads(line)
+                key = result.get('key')
                 
-                if success:
-                    successful.append(task)
+                if key is None:
+                    continue
+                
+                task_idx = int(key)
+                task = tasks[task_idx]
+                
+                if 'error' in result:
+                    print(f"  ✗ {task['fname']}: {result['error']}")
+                    failed += 1
+                    continue
+                
+                # Extract image
+                response = result.get('response', {})
+                candidates = response.get('candidates', [])
+                
+                if not candidates:
+                    failed += 1
+                    continue
+                
+                parts = candidates[0].get('content', {}).get('parts', [])
+                
+                for part in parts:
+                    if 'inlineData' in part:
+                        img_data = part['inlineData'].get('data')
+                        if img_data:
+                            os.makedirs(task['out_dir'], exist_ok=True)
+                            img = Image.open(BytesIO(base64.b64decode(img_data)))
+                            img.save(task['out'], "JPEG", quality=JPEG_QUALITY)
+                            success += 1
+                            break
                 else:
-                    failed.append(task)
-                    log_message(f"FAILED: {task['output_filename']} - {error}")
-                
-                pbar.update(1)
-                pbar.set_postfix(ok=len(successful), fail=len(failed))
-    
-    return successful, failed
-
-def copy_original_images(tasks):
-    """Copy original source images to output folders."""
-    seen_sources = set()
-    
-    for task in tasks:
-        source = task['source_image']
-        if source in seen_sources:
-            continue
-        seen_sources.add(source)
+                    failed += 1
+                    
+            except Exception as e:
+                print(f"  Error processing result: {e}")
+                failed += 1
         
-        filename = os.path.basename(source)
-        if ' - ' in filename:
-            sku = filename.split(' - ')[0]
-        else:
-            sku = os.path.splitext(filename)[0]
+        return success, failed
         
-        ext = os.path.splitext(filename)[1]
-        original_dest = os.path.join(task['output_folder'], f"{sku} - 0 Original{ext}")
-        
-        try:
-            os.makedirs(task['output_folder'], exist_ok=True)
-            shutil.copy2(source, original_dest)
-        except Exception as e:
-            log_message(f"Failed to copy original {source}: {e}", also_print=True)
+    except Exception as e:
+        print(f"Download failed: {e}")
+        return 0, len(tasks)
 
-def verify_all_outputs(tasks):
-    """Check which expected outputs exist. Returns (existing, missing)."""
-    existing = []
-    missing = []
-    
-    for task in tasks:
-        if os.path.exists(task['output_path']) and os.path.getsize(task['output_path']) > 1000:
-            existing.append(task)
-        else:
-            missing.append(task)
-    
-    return existing, missing
+def copy_originals(tasks):
+    seen = set()
+    for t in tasks:
+        if t['src'] in seen: continue
+        seen.add(t['src'])
+        fname = os.path.basename(t['src'])
+        sku = fname.split(' - ')[0] if ' - ' in fname else os.path.splitext(fname)[0]
+        dest = os.path.join(t['out_dir'], f"{sku} - 0 Original{os.path.splitext(fname)[1]}")
+        if not file_ok(dest):
+            os.makedirs(t['out_dir'], exist_ok=True)
+            try: shutil.copy2(t['src'], dest)
+            except: pass
 
-def flatten_structure():
-    """Copy all images from hierarchical structure to single flat folder."""
-    print("\n" + "="*60)
-    print("Flattening folder structure...")
-    print("="*60)
-    
-    if os.path.exists(FLAT_OUTPUT_FOLDER):
-        shutil.rmtree(FLAT_OUTPUT_FOLDER)
-    os.makedirs(FLAT_OUTPUT_FOLDER, exist_ok=True)
-    
-    img_extensions = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff"}
-    all_images = []
-    
+def flatten():
+    print("\nFlattening...")
+    if os.path.exists(FLAT_OUTPUT_FOLDER): shutil.rmtree(FLAT_OUTPUT_FOLDER)
+    os.makedirs(FLAT_OUTPUT_FOLDER)
+    n = 0
     for root, _, files in os.walk(OUTPUT_FOLDER):
-        for filename in files:
-            if os.path.splitext(filename)[1].lower() in img_extensions:
-                all_images.append(os.path.join(root, filename))
+        for f in files:
+            if f.lower().endswith(('.jpg', '.jpeg', '.png')):
+                shutil.copy2(os.path.join(root, f), os.path.join(FLAT_OUTPUT_FOLDER, f))
+                n += 1
+    print(f"✓ {n} images → {FLAT_OUTPUT_FOLDER}/")
+
+# ============================================================================
+# Chunked Batch Processing (for large jobs)
+# ============================================================================
+
+CHUNK_SIZE = 500  # Images per batch job (keeps file size manageable ~100MB)
+
+def run_chunked_batches(tasks):
+    """Split into multiple smaller batch jobs."""
+    total_chunks = (len(tasks) + CHUNK_SIZE - 1) // CHUNK_SIZE
+    print(f"\nSplitting {len(tasks)} images into {total_chunks} batch jobs ({CHUNK_SIZE} each)")
     
-    print(f"Found {len(all_images)} images to flatten")
+    all_batch_names = []
     
-    copied = 0
-    for src_path in all_images:
-        filename = os.path.basename(src_path)
-        dst_path = os.path.join(FLAT_OUTPUT_FOLDER, filename)
-        try:
-            shutil.copy2(src_path, dst_path)
-            copied += 1
-        except Exception as e:
-            print(f"  ✗ Failed to copy {filename}: {e}")
+    for chunk_idx in range(total_chunks):
+        start = chunk_idx * CHUNK_SIZE
+        end = min(start + CHUNK_SIZE, len(tasks))
+        chunk_tasks = tasks[start:end]
+        
+        print(f"\n{'='*40}")
+        print(f"CHUNK {chunk_idx + 1}/{total_chunks} ({len(chunk_tasks)} images)")
+        print(f"{'='*40}")
+        
+        timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+        jsonl_file = os.path.join(BATCH_FOLDER, f"batch_chunk{chunk_idx}_{timestamp}.jsonl")
+        
+        # Create JSONL for this chunk
+        write_batch_jsonl(chunk_tasks, jsonl_file)
+        
+        # Save task mapping for this chunk
+        task_map_file = os.path.join(BATCH_FOLDER, f"task_map_chunk{chunk_idx}_{timestamp}.json")
+        with open(task_map_file, 'w') as f:
+            json.dump({
+                'start_idx': start,
+                'tasks': [{'out': t['out'], 'out_dir': t['out_dir'], 'fname': t['fname']} for t in chunk_tasks]
+            }, f)
+        
+        # Upload
+        file_name = upload_file_resumable(jsonl_file)
+        if not file_name:
+            print(f"✗ Chunk {chunk_idx + 1} upload failed, skipping")
+            continue
+        
+        # Submit
+        batch_name = submit_batch_job(file_name)
+        if batch_name:
+            all_batch_names.append({
+                'batch_name': batch_name,
+                'chunk_idx': chunk_idx,
+                'task_map_file': task_map_file,
+                'num_tasks': len(chunk_tasks)
+            })
     
-    print(f"\n✓ Copied {copied} images to {FLAT_OUTPUT_FOLDER}/")
+    # Save all batch info
+    all_batches_file = os.path.join(BATCH_FOLDER, f"all_batches_{datetime.now().strftime('%Y%m%d-%H%M%S')}.json")
+    with open(all_batches_file, 'w') as f:
+        json.dump(all_batch_names, f, indent=2)
+    
+    print(f"\n✓ Submitted {len(all_batch_names)} batch jobs")
+    print(f"✓ Saved batch info to {all_batches_file}")
+    
+    return all_batch_names, all_batches_file
+
+def monitor_all_batches(batches_file):
+    """Monitor multiple batch jobs until all complete."""
+    with open(batches_file) as f:
+        batches = json.load(f)
+    
+    print(f"\nMonitoring {len(batches)} batch jobs...")
+    
+    completed = []
+    pending = list(batches)
+    
+    while pending:
+        still_pending = []
+        
+        for batch_info in pending:
+            try:
+                batch = client.batches.get(name=batch_info['batch_name'])
+                state = batch.state.name if hasattr(batch.state, 'name') else str(batch.state)
+                
+                if 'SUCCEEDED' in state:
+                    print(f"  ✓ Chunk {batch_info['chunk_idx'] + 1} complete!")
+                    completed.append((batch_info, batch))
+                elif 'FAILED' in state or 'CANCELLED' in state:
+                    print(f"  ✗ Chunk {batch_info['chunk_idx'] + 1} failed")
+                else:
+                    still_pending.append(batch_info)
+                    
+            except Exception as e:
+                still_pending.append(batch_info)
+        
+        pending = still_pending
+        
+        if pending:
+            print(f"  {datetime.now().strftime('%H:%M:%S')} | Completed: {len(completed)}/{len(batches)} | Pending: {len(pending)}")
+            time.sleep(60)
+    
+    return completed
 
 # ============================================================================
 # Main
 # ============================================================================
 
 def main():
-    """Main generation workflow with verification and retry."""
-    print("="*60)
-    print("AI Image Generation Pipeline")
-    print("="*60)
+    import sys
     
-    if GEMINI_API_KEY is None:
+    print("="*60)
+    print("AI Image Generation - BATCH API (50% cheaper!)")
+    print("="*60)
+    print(f"\n4K pricing: $0.12/image (vs $0.24 standard)")
+    print("Trade-off: Results in 1-24 hours\n")
+    
+    if not API_KEY or not client:
+        print("✗ API key not found")
+        return
+    
+    # Check for --monitor argument to resume monitoring
+    if len(sys.argv) > 2 and sys.argv[1] == '--monitor':
+        batches_file = sys.argv[2]
+        print(f"Resuming monitoring from: {batches_file}")
+        completed = monitor_all_batches(batches_file)
+        print(f"\n✓ {len(completed)} batches completed")
+        print("Run full script again to download results")
+        return
+    
+    # Check for --check argument for single batch
+    if len(sys.argv) > 2 and sys.argv[1] == '--check':
+        batch_name = sys.argv[2]
+        print(f"Checking status of: {batch_name}")
+        batch = poll_batch_status(batch_name)
         return
     
     if not os.path.exists(INPUT_FOLDER):
-        print(f"\n✗ ERROR: Input folder '{INPUT_FOLDER}' not found")
+        print(f"✗ {INPUT_FOLDER} not found")
         return
     
-    # Clear log
-    if os.path.exists(LOG_FILE):
-        os.remove(LOG_FILE)
-    
-    # Clear output
-    if os.path.exists(OUTPUT_FOLDER):
-        print(f"\nDeleting existing folder: {OUTPUT_FOLDER}/")
-        shutil.rmtree(OUTPUT_FOLDER)
     os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+    shot_cfg, cat_cfg = load_config()
+    variants = VARIANTS_TEST if TEST_MODE else VARIANTS_PRODUCTION
     
-    # Load config files
-    shot_config, category_config = load_config()
+    # Build tasks
+    tasks, skipped = build_tasks(shot_cfg, cat_cfg, variants)
+    print(f"✓ Already done: {skipped}")
+    print(f"→ To generate: {len(tasks)}")
     
-    # Select variant counts based on mode
-    variant_counts = VARIANTS_TEST if TEST_MODE else VARIANTS_PRODUCTION
+    if not tasks:
+        print("\n✓ All images already complete!")
+        flatten()
+        return
     
-    print(f"\nMode: {'TEST' if TEST_MODE else 'PRODUCTION'}")
-    print(f"Model: {GEMINI_MODEL}")
-    print(f"Image Size: {DEFAULT_IMAGE_SIZE}")
-    print(f"Default Aspect Ratio: {DEFAULT_ASPECT_RATIO}")
-    print(f"Parallel workers: {MAX_PARALLEL_REQUESTS}")
-    print(f"Max retry rounds: {MAX_RETRY_ROUNDS}")
-    print(f"\nVariant counts:")
-    for k, v in variant_counts.items():
-        print(f"  {k}: {v}")
+    # Cost estimate
+    cost_standard = len(tasks) * 0.24
+    cost_batch = len(tasks) * 0.12
+    savings = cost_standard - cost_batch
+    print(f"\n💰 Cost estimate:")
+    print(f"   Standard API: ${cost_standard:,.0f}")
+    print(f"   Batch API:    ${cost_batch:,.0f}")
+    print(f"   You save:     ${savings:,.0f} (50%!)")
     
-    # Build task manifest
-    print("\nBuilding task manifest...")
-    all_tasks = build_generation_tasks(shot_config, category_config, variant_counts)
-    
-    # Count fitted vs standard
-    fitted_count = sum(1 for t in all_tasks if t.get('is_fitted'))
-    standard_count = len(all_tasks) - fitted_count
-    print(f"Total images to generate: {len(all_tasks)}")
-    print(f"  Standard (1:1): {standard_count}")
-    print(f"  Fitted (dynamic AR): {fitted_count}")
+    print(f"\nWill split into chunks of {CHUNK_SIZE} images each")
+    input(f"\nPress Enter to start batch job for {len(tasks)} images...")
     
     # Copy originals
     print("\nCopying original images...")
-    copy_original_images(all_tasks)
+    copy_originals(tasks)
     
-    # Initial generation
-    successful, failed = run_generation_pass(
-        all_tasks, GEMINI_API_KEY, GEMINI_MODEL, DEFAULT_IMAGE_SIZE,
-        API_RETRY_MAX_ATTEMPTS, API_RETRY_BASE_DELAY_SECONDS, 
-        JPEG_QUALITY, MAX_PARALLEL_REQUESTS,
-        pass_name="Initial Generation"
-    )
+    # Use chunked approach for large jobs
+    batches, batches_file = run_chunked_batches(tasks)
     
-    # Retry failed
-    retry_round = 1
-    while failed and retry_round <= MAX_RETRY_ROUNDS:
-        print(f"\n{'='*60}")
-        print(f"RETRY ROUND {retry_round}/{MAX_RETRY_ROUNDS} - {len(failed)} images")
-        print(f"{'='*60}")
-        time.sleep(5)
-        
-        retry_successful, still_failed = run_generation_pass(
-            failed, GEMINI_API_KEY, GEMINI_MODEL, DEFAULT_IMAGE_SIZE,
-            API_RETRY_MAX_ATTEMPTS, API_RETRY_BASE_DELAY_SECONDS,
-            JPEG_QUALITY, MAX_PARALLEL_REQUESTS,
-            pass_name=f"Retry Round {retry_round}"
-        )
-        
-        successful.extend(retry_successful)
-        failed = still_failed
-        retry_round += 1
+    if not batches:
+        print("No batches submitted successfully")
+        return
     
-    # Final verification
-    print("\n" + "="*60)
-    print("FINAL VERIFICATION")
-    print("="*60)
-    
-    verified, missing = verify_all_outputs(all_tasks)
-    print(f"Expected: {len(all_tasks)}")
-    print(f"Verified: {len(verified)}")
-    print(f"Missing:  {len(missing)}")
-    
-    if missing:
-        print("\nMissing files (first 20):")
-        for task in missing[:20]:
-            print(f"  - {task['output_filename']}")
-    
-    # Flatten
-    flatten_structure()
-    
-    # Summary
-    success_rate = (len(verified) / len(all_tasks) * 100) if all_tasks else 0
     print(f"\n{'='*60}")
-    print("GENERATION COMPLETE")
+    print(f"ALL BATCHES SUBMITTED!")
     print(f"{'='*60}")
-    print(f"Total expected:    {len(all_tasks)}")
-    print(f"Successfully made: {len(verified)} ({success_rate:.1f}%)")
-    print(f"Still missing:     {len(missing)}")
-    print(f"\nHierarchical: {OUTPUT_FOLDER}/")
-    print(f"Flat dump:    {FLAT_OUTPUT_FOLDER}/")
-    print(f"Error log:    {LOG_FILE}")
+    print(f"Total batches: {len(batches)}")
+    print(f"Batch info saved to: {batches_file}")
+    print(f"\nNow waiting for completion (can take 1-24 hours)...")
+    print(f"You can Ctrl+C and check later with:")
+    print(f"  python generate_images_batch.py --monitor {batches_file}")
     
-    return len(missing) == 0
+    # Monitor all batches
+    completed = monitor_all_batches(batches_file)
+    
+    # Download all results
+    success = 0
+    failed = 0
+    
+    for batch_info, batch in completed:
+        with open(batch_info['task_map_file']) as f:
+            task_map = json.load(f)
+        
+        chunk_tasks = []
+        for t in task_map['tasks']:
+            chunk_tasks.append(t)
+        
+        s, f = download_results(batch, chunk_tasks)
+        success += s
+        failed += f
+    
+    print(f"\n{'='*60}")
+    print("BATCH COMPLETE")
+    print(f"{'='*60}")
+    print(f"✓ Generated: {success}")
+    print(f"✗ Failed: {failed}")
+    
+    if failed > 0:
+        print(f"\nTo retry failed: python generate_images.py")
+    
+    flatten()
 
 if __name__ == "__main__":
     main()

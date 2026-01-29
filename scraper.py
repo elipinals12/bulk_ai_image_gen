@@ -26,7 +26,8 @@ BASE_URL = "https://aquateak.com"
 HOMEPAGE_URL = "https://aquateak.com/"
 
 OUTPUT_DIR = "aquateak_products"
-LOG_FILE = "scraper_log.txt"
+os.makedirs("logs", exist_ok=True)
+LOG_FILE = "logs/scraper_log.txt"
 CATEGORY_CONFIG = "category_prompts.json"
 
 # White background detection

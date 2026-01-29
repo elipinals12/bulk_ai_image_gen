@@ -75,7 +75,8 @@ MAX_RETRY_ROUNDS = 3  # Full retry passes for failed images
 INPUT_FOLDER = "aquateak_products"
 OUTPUT_FOLDER = "generated_images"
 FLAT_OUTPUT_FOLDER = "all_generated"
-LOG_FILE = "generation_log.txt"
+os.makedirs("logs", exist_ok=True)
+LOG_FILE = "logs/generation_log.txt"
 
 # --- Prompt Config Files ---
 SHOT_PROMPTS_FILE = "shot_prompts.json"       # Base prompts + state modifiers

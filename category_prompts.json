@@ -1,33 +1,6 @@
 {
-  "room_variants_per_image": 3,
-  "tight_variants_per_image": 3,
-  "cropped_variants_per_image": 2,
-  "white_variants_per_image": 1,
-  "white_in_use_variants_per_image": 1,
-  
-  "test_mode_variants_per_image": 1,
-  
-  "aspect_ratio": "1:1",
-  "image_size": "4K",
-  
-  "max_parallel_requests": 5,
-  "api_retry_max_attempts": 3,
-  "api_retry_base_delay_seconds": 10,
-  "jpeg_quality": 95,
-  
-  "state_open": "Show product OPEN with interior visible and accessible. Keep all walls and parts, just show one or two doors open to show interior, do not add any extra parts",
-  "state_closed": "Show product CLOSED with only exterior visible.",
-  
-  "base_prompt_room": "Professional lifestyle photograph. PRODUCT MUST BE IDENTICAL to input image - exact same shape, size, construction. Show in natural room setting with pulled-back perspective. Few appropriate items nearby. Bright studio lighting, clean throughout.",
-  
-  "base_prompt_tight": "Professional lifestyle photograph with tight framing. PRODUCT MUST BE IDENTICAL to input image - exact same shape, size, construction. Frame product edge-to-edge showing complete item. Minimal setting visible. Bright studio lighting, clean throughout.",
-  
-  "base_prompt_cropped": "Professional lifestyle photograph, close-up detail shot. PRODUCT MUST BE IDENTICAL to input image. Zoom to show texture, materials, craftsmanship details. Bright natural lighting, high quality.",
-  
-  "base_prompt_white": "Professional studio photograph on pure white seamless background. PRODUCT MUST BE IDENTICAL to input image - exact same structure. Bright studio lighting with soft shadows. Pure white background, nothing else in frame.",
-  
-  "base_prompt_white-in-use": "Professional studio lifestyle photograph on pure white seamless background. PRODUCT MUST BE IDENTICAL to input image - exact same structure. Show product with appropriate items placed naturally on or in product. Pure white background. Bright studio lighting.",
-  
+  "_description": "Category-specific scene/setting prompts. These describe WHERE the product is shown for room/tight/cropped shots.",
+
   "categories": {
     "Bathroom": {
       "Bathroom Furniture and Storage": {
@@ -54,7 +27,7 @@
       },
       "Bath Accessories": {
         "Floor Mats": {
-          "prompt": "Bathroom floor near shower or tub. Wet surface around mat. Slippers nearby/on matt. Nearby subtle footprints acceptable. Clean tile, bright lighting.",
+          "prompt": "Bathroom floor near shower or tub. Wet surface around mat. Slippers nearby or on the matt. Clean tile, bright lighting.",
           "openable": false
         },
         "Waste Baskets and Hampers": {
@@ -106,11 +79,11 @@
       },
       "Kitchen": {
         "Bar and Counter Stools": {
-          "prompt": "Kitchen island or breakfast bar. Close focus on one stool with others visible in background. Pendant lighting, contemporary kitchen.",
+          "prompt": "Kitchen island or breakfast bar. Close focus on one stool with others visible in background. Pendant lighting, contemporary kitchen. Can show bottom of someone sitting on stool",
           "openable": false
         },
         "Countertop Accessories": {
-          "prompt": "Kitchen countertop. Fresh ingredient or cooking element nearby. Clean bright lighting, organized aesthetic.",
+          "prompt": "Kitchen countertop. Fresh ingredient or cooking element nearby. Product in use. Clean bright lighting, organized aesthetic.",
           "openable": false
         },
         "Dining": {
@@ -138,7 +111,7 @@
           "openable": false
         },
         "Games": {
-          "prompt": "Single game setup on lawn or patio. Backyard with outdoor area in background. Bright natural daylight.",
+          "prompt": "Realistic game setup (so for cornhole, just one not both shown) on lawn or patio. Backyard with outdoor area in background. Bright natural daylight.",
           "openable": false
         },
         "Garden": {

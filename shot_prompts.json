@@ -1,0 +1,24 @@
+{
+  "_description": "Prompts for each shot type and product states. Edit these to change how shots are generated.",
+
+  "base_prompts": {
+    "room": "Professional lifestyle photograph. PRODUCT MUST BE IDENTICAL to input image - exact same shape, size, construction. Show in natural room setting with pulled-back perspective. Few appropriate items nearby. Bright studio lighting, clean throughout.",
+
+    "tight": "Professional lifestyle photograph with tight framing. PRODUCT MUST BE IDENTICAL to input image - exact same shape, size, construction. Frame product edge-to-edge showing complete item. Minimal setting visible. Bright studio lighting, clean throughout.",
+
+    "cropped": "Professional lifestyle photograph, close-up detail shot. PRODUCT MUST BE IDENTICAL to input image. Zoom to show texture, materials, craftsmanship details. Bright natural lighting, high quality.",
+
+    "white": "Professional studio photograph on pure white seamless background. PRODUCT MUST BE IDENTICAL to input image - exact same structure. Bright studio lighting with soft shadows. Pure white background, nothing else in frame.",
+
+    "white-in-use": "Professional studio lifestyle photograph on pure white seamless background. PRODUCT MUST BE IDENTICAL to input image - exact same structure. Show product with appropriate items placed naturally on or in product. Pure white background. Bright studio lighting.",
+
+    "white-fitted": "Professional studio photograph on pure white seamless background. PRODUCT MUST BE IDENTICAL to input image - exact same structure. Frame the product tightly with minimal padding, showing the complete product edge-to-edge. Bright studio lighting with soft shadows. Pure white background, nothing else in frame.",
+
+    "white-in-use-fitted": "Professional studio lifestyle photograph on pure white seamless background. PRODUCT MUST BE IDENTICAL to input image - exact same structure. Frame the product tightly with minimal padding. Show product with appropriate items placed naturally on or in product. Pure white background. Bright studio lighting."
+  },
+
+  "state_modifiers": {
+    "open": "Show product OPEN with interior visible and accessible. Keep all walls and parts, just show doors open to show interior, do not add any extra parts. Do not add new shelves inside.",
+    "closed": "Show product CLOSED with only exterior visible."
+  }
+}

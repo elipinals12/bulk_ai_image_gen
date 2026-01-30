@@ -1,9 +1,5 @@
-aquateak_products/
-generated_images/
-all_generated/
-scraper_log.txt
-generation_log.txt
-cleaned_images/
+inputs/
+outputs/
 notes/
+logs/
 apikey.txt
-batch_jobs/

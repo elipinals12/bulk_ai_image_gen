@@ -5,11 +5,11 @@
     "Bathroom": {
       "Bathroom Furniture and Storage": {
         "Shower Benches": {
-          "prompt": "Spa shower with wet tile surfaces. Product with wet appearance. Few bath items nearby. No steam, no running water.",
+          "prompt": "Spa shower with wet tile surfaces. Product with wet appearance. Few bath items nearby. No steam, no running water. No dry towels inside the shower.",
           "openable": false
         },
         "Shower Organizers and Caddies": {
-          "prompt": "Shower area with wet tile. Few toiletries in organizer. No steam, no running water.",
+          "prompt": "Shower area with wet tile. Few toiletries in organizer. No steam, no running water. No dry towels inside the shower.",
           "openable": false
         },
         "Floating Wall Shelves": {

@@ -1,15 +1,22 @@
 """
-AI Image Generation Pipeline
-Supports both real-time API and batch API (50% cheaper) modes.
+AI Image Generation Pipeline v3 (2026-05) - BATCH-ONLY, RESILIENT
+- Model: Nano Banana Pro (gemini-3-pro-image-preview)
+- Filename convention: "[SKU] Product Name.jpg"
+- Output: outputs/generated_images/[SKU]/[SKU] - N Shot vK.jpg
+- Crash-safe: state.json tracks every batch, just re-run script to resume
+- Verbose error logs to logs/errors.log, concise stdout progress
 """
 
 import os
+import re
 import json
 import base64
 import shutil
 import time
 import sys
-from datetime import datetime
+import traceback
+import logging
+from datetime import datetime, timezone
 from PIL import Image
 from io import BytesIO
 from tqdm import tqdm
@@ -19,10 +26,10 @@ from google import genai
 from google.genai import types
 
 # ============================================================================
-# FOLDER CONFIGURATION
+# CONFIG
 # ============================================================================
 
-INPUT_FOLDER = "inputs/aquateak_products"
+INPUT_FOLDER = "inputs/run2"
 OUTPUT_FOLDER = "outputs/generated_images"
 BATCH_FOLDER = "outputs/batch_jobs"
 LOG_FOLDER = "logs"
@@ -31,62 +38,147 @@ PROMPT_FOLDER = "prompts"
 SHOT_PROMPTS_FILE = os.path.join(PROMPT_FOLDER, "shot_prompts.json")
 CATEGORY_PROMPTS_FILE = os.path.join(PROMPT_FOLDER, "category_prompts.json")
 API_KEY_FILE = "apikey.txt"
-TEMP_BATCH_FILE = os.path.join(LOG_FOLDER, "temp_batch_download.jsonl")
+STATE_FILE = os.path.join(BATCH_FOLDER, "state.json")
+ERROR_LOG = os.path.join(LOG_FOLDER, "errors.log")
 
-# ============================================================================
-# GENERATION SETTINGS
-# ============================================================================
-
+# Nano Banana Pro - strongest model
 GEMINI_MODEL = "gemini-3-pro-image-preview"
+
+# ============================================================================
+# Google API Pricing (Nano Banana Pro, batch tier = 50% off real-time)
+# Source: https://ai.google.dev/gemini-api/docs/pricing
+# Update these if Google changes rates.
+# ============================================================================
+
+# $/M tokens (batch tier, already discounted 50% from real-time)
+TEXT_INPUT_RATE_PER_M  = 1.00     # text prompt tokens
+IMAGE_INPUT_RATE_PER_M = 0.55     # per uploaded input image tokens
+IMAGE_OUTPUT_RATE_PER_M = 60.00   # per generated output image tokens
+
+# Tokens per input image (fixed by Google)
+TOKENS_PER_INPUT_IMAGE = 560
+
+# Tokens per output image - varies by resolution (1:1 reference; other ARs ~same)
+OUTPUT_TOKENS_BY_SIZE = {
+    "512": 747,
+    "1K":  1120,
+    "2K":  1568,
+    "4K":  2000,
+}
+
+# Real-time multiplier (for showing what user is saving)
+REALTIME_MULTIPLIER = 2.0
 
 DEFAULT_ASPECT_RATIO = "1:1"
 DEFAULT_IMAGE_SIZE = "4K"
 JPEG_QUALITY = 95
 
-# Real-time API rate limiting (Tier 1 = 10 IPM)
-MAX_PARALLEL_REQUESTS = 2
-MIN_REQUEST_INTERVAL = 7.0
-API_RETRY_MAX_ATTEMPTS = 5
-API_RETRY_BASE_DELAY_SECONDS = 30
-
-# Batch API settings
-CHUNK_SIZE = 1000  # Images per batch job
+# Tier 1 batch enqueued-token cap is 2M for Pro Image. ~1k tokens/req input,
+# so 500/chunk is a healthy safety margin.
+CHUNK_SIZE = 500
+# Tier 1 allows 100 concurrent batch jobs. Pause briefly between submissions.
+INTER_SUBMIT_DELAY = 2.0
+# Retry config for upload/submit/download
+UPLOAD_MAX_RETRIES = 5
+UPLOAD_RETRY_DELAY = 30   # seconds, multiplied by attempt
+# Polling cadence
+POLL_INTERVAL = 60        # seconds between status checks
+POLL_HEARTBEAT = True     # print heartbeat every poll cycle even when nothing changes
 
 VARIANTS_PRODUCTION = {
     'white': 1, 'white_in_use': 2, 'white_fitted': 1,
-    'white_in_use_fitted': 2, 'room': 2, 'tight': 5, 'cropped': 3,
+    'white_in_use_fitted': 2, 'room': 2, 'tight': 3, 'cropped': 3,
 }
-VARIANTS_TEST = {k: 1 for k in VARIANTS_PRODUCTION.keys()}
 
 SUPPORTED_ASPECT_RATIOS = ["1:1", "2:3", "3:2", "3:4", "4:3", "4:5", "5:4", "9:16", "16:9", "21:9"]
 
 # ============================================================================
-# API Setup
+# Logging setup
+# ============================================================================
+
+os.makedirs(LOG_FOLDER, exist_ok=True)
+os.makedirs(BATCH_FOLDER, exist_ok=True)
+
+err_logger = logging.getLogger('errors')
+err_logger.setLevel(logging.DEBUG)
+fh = logging.FileHandler(ERROR_LOG)
+fh.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
+err_logger.addHandler(fh)
+
+def info(msg):
+    """Concise stdout-only print."""
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+
+def warn(msg, exc=None):
+    """Warning - print + file log with stack trace if exception."""
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] WARN {msg}", flush=True)
+    if exc:
+        err_logger.warning(f"{msg}\n{traceback.format_exc()}")
+    else:
+        err_logger.warning(msg)
+
+def err(msg, exc=None):
+    """Error - print + file log with full context."""
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] ERROR {msg}", flush=True)
+    if exc:
+        err_logger.error(f"{msg}\n{traceback.format_exc()}")
+    else:
+        err_logger.error(msg)
+
+# ============================================================================
+# API setup
 # ============================================================================
 
 def load_api_key():
     try:
         with open(API_KEY_FILE) as f:
             return f.read().strip()
-    except:
-        print("✗ apikey.txt not found!")
+    except Exception as e:
+        err(f"could not read {API_KEY_FILE}", e)
         return None
 
 API_KEY = load_api_key()
 client = genai.Client(api_key=API_KEY) if API_KEY else None
 
-def log(msg):
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+def verify_api_key():
+    """Free verification via models.list. No tokens charged."""
+    if not client:
+        return False, "no client"
+    try:
+        models = list(client.models.list())
+        if not models:
+            return False, "key works but no models returned"
+        ids = [m.name for m in models if hasattr(m, 'name')]
+        ok = any(GEMINI_MODEL in s for s in ids)
+        msg = f"key valid, {len(models)} models visible"
+        if not ok:
+            msg += f" (warning: {GEMINI_MODEL} not enumerated - may still work)"
+        return True, msg
+    except Exception as e:
+        err("api key verification failed", e)
+        return False, f"verification failed: {e}"
 
 # ============================================================================
-# Helpers
+# Filename / helpers
 # ============================================================================
+
+FILENAME_RE = re.compile(r'^\[([^\]]+)\]\s*(.+)$')
+
+def parse_filename(filename):
+    stem = os.path.splitext(filename)[0]
+    m = FILENAME_RE.match(stem)
+    if not m:
+        return None, None
+    sku_inner = m.group(1).strip()
+    product = m.group(2).strip()
+    return f"[{sku_inner}]", product
 
 def find_best_ar(path):
     try:
         with Image.open(path) as img:
             r = img.size[0] / img.size[1]
-    except:
+    except Exception as e:
+        warn(f"could not read image dimensions {path}", e)
         return "1:1"
     best, best_d = "1:1", 999
     for ar in SUPPORTED_ASPECT_RATIOS:
@@ -104,8 +196,10 @@ def load_config():
             cat = json.load(f)
         return shot, cat
     except FileNotFoundError as e:
-        print(f"✗ Config file not found: {e.filename}")
-        print(f"  Expected: {SHOT_PROMPTS_FILE} and {CATEGORY_PROMPTS_FILE}")
+        err(f"config file missing: {e.filename}")
+        return None, None
+    except json.JSONDecodeError as e:
+        err(f"config file invalid JSON: {e}", e)
         return None, None
 
 def file_ok(path):
@@ -130,11 +224,96 @@ def get_prompt(shot_cfg, cat_cfg, top, mid, gran, shot_type, product, state=None
     return p
 
 # ============================================================================
-# Task Building
+# State management (crash-safe resume)
+# ============================================================================
+
+def load_state():
+    if not os.path.exists(STATE_FILE):
+        return None
+    try:
+        with open(STATE_FILE) as f:
+            return json.load(f)
+    except Exception as e:
+        warn(f"state file corrupted: {e}", e)
+        return None
+
+def estimate_text_tokens(text):
+    """Rough estimate: ~4 chars per token for English text."""
+    return max(1, len(text) // 4)
+
+def calculate_costs(tasks):
+    """Compute cost estimate from REAL task data + Google's published rates.
+    Nothing hardcoded per-image - everything derived.
+    Returns dict with full breakdown.
+    """
+    n = len(tasks)
+    if n == 0:
+        return None
+
+    # Real prompt tokens from actual task prompts
+    total_prompt_tokens = sum(estimate_text_tokens(t['prompt']) for t in tasks)
+    avg_prompt_tokens = total_prompt_tokens // n
+
+    # Image tokens (fixed by Google)
+    output_tokens_each = OUTPUT_TOKENS_BY_SIZE.get(DEFAULT_IMAGE_SIZE, 2000)
+    total_input_img_tokens = n * TOKENS_PER_INPUT_IMAGE
+    total_output_img_tokens = n * output_tokens_each
+
+    # Derive cost from rates
+    text_cost   = total_prompt_tokens     * TEXT_INPUT_RATE_PER_M  / 1_000_000
+    img_in_cost = total_input_img_tokens  * IMAGE_INPUT_RATE_PER_M / 1_000_000
+    img_out_cost= total_output_img_tokens * IMAGE_OUTPUT_RATE_PER_M / 1_000_000
+    total_batch = text_cost + img_in_cost + img_out_cost
+    total_realtime = total_batch * REALTIME_MULTIPLIER
+
+    # Per-image derived (not hardcoded)
+    per_img_batch = total_batch / n
+
+    return {
+        'n': n,
+        'avg_prompt_tokens': avg_prompt_tokens,
+        'total_prompt_tokens': total_prompt_tokens,
+        'output_tokens_each': output_tokens_each,
+        'text_cost': text_cost,
+        'img_in_cost': img_in_cost,
+        'img_out_cost': img_out_cost,
+        'total_batch': total_batch,
+        'total_realtime': total_realtime,
+        'per_img_batch': per_img_batch,
+    }
+
+def save_state(state):
+    try:
+        tmp = STATE_FILE + ".tmp"
+        with open(tmp, 'w') as f:
+            json.dump(state, f, indent=2)
+        os.replace(tmp, STATE_FILE)
+    except Exception as e:
+        err("could not save state file", e)
+
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+def elapsed_since(iso_str):
+    try:
+        t = datetime.fromisoformat(iso_str)
+        now = datetime.now(timezone.utc)
+        delta = now - t
+        s = int(delta.total_seconds())
+        if s < 60: return f"{s}s"
+        if s < 3600: return f"{s//60}m {s%60}s"
+        h = s // 3600
+        m = (s % 3600) // 60
+        return f"{h}h {m}m"
+    except:
+        return "?"
+
+# ============================================================================
+# Task building
 # ============================================================================
 
 def build_tasks(shot_cfg, cat_cfg, variants):
-    tasks, skipped = [], 0
+    tasks, skipped, parse_failed = [], 0, []
     shots = [
         ('white', 'White refresh', '1', False),
         ('white-fitted', 'White fitted', '1A', True),
@@ -155,16 +334,17 @@ def build_tasks(shot_cfg, cat_cfg, variants):
                 if not os.path.isdir(gp): continue
                 try:
                     openable = cat_cfg["categories"][top][mid][gran].get("openable", False)
-                except:
+                except KeyError:
                     openable = False
                 files = [f for f in os.listdir(gp) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-                if TEST_MODE: files = files[:1]
                 for img_file in files:
                     img_path = os.path.join(gp, img_file)
+                    sku, product = parse_filename(img_file)
+                    if not sku:
+                        parse_failed.append(img_file)
+                        continue
                     fitted_ar = find_best_ar(img_path)
-                    sku = img_file.split(' - ')[0] if ' - ' in img_file else os.path.splitext(img_file)[0]
-                    product = os.path.splitext(' - '.join(img_file.split(' - ')[1:]))[0] if ' - ' in img_file else sku
-                    out_dir = os.path.join(OUTPUT_FOLDER, top, mid, gran, sku)
+                    out_dir = os.path.join(OUTPUT_FOLDER, sku)
                     states = ['closed', 'open'] if openable else [None]
                     for state in states:
                         for internal, display, num, fitted in shots:
@@ -180,77 +360,36 @@ def build_tasks(shot_cfg, cat_cfg, variants):
                                     'prompt': get_prompt(shot_cfg, cat_cfg, top, mid, gran, internal, product, state),
                                     'ar': fitted_ar if fitted else DEFAULT_ASPECT_RATIO, 'sku': sku,
                                 })
+    if parse_failed:
+        warn(f"{len(parse_failed)} files did NOT match [SKU] format and were SKIPPED:")
+        for f in parse_failed[:10]:
+            err_logger.warning(f"  unparseable filename: {f}")
+        if len(parse_failed) > 10:
+            err_logger.warning(f"  ... and {len(parse_failed)-10} more (see logs/errors.log)")
     return tasks, skipped
 
 def copy_originals(tasks):
     seen = set()
+    copied = 0
     for t in tasks:
         if t['src'] in seen: continue
         seen.add(t['src'])
         fname = os.path.basename(t['src'])
-        sku = fname.split(' - ')[0] if ' - ' in fname else os.path.splitext(fname)[0]
-        dest = os.path.join(t['out_dir'], f"{sku} - 0 Original{os.path.splitext(fname)[1]}")
+        sku = t['sku']
+        ext = os.path.splitext(fname)[1]
+        dest = os.path.join(t['out_dir'], f"{sku} - 0 Original{ext}")
         if not file_ok(dest):
             os.makedirs(t['out_dir'], exist_ok=True)
-            try: shutil.copy2(t['src'], dest)
-            except: pass
+            try:
+                shutil.copy2(t['src'], dest)
+                copied += 1
+            except Exception as e:
+                err(f"could not copy original {t['src']} -> {dest}", e)
+    if copied:
+        info(f"copied {copied} original images into output sku folders")
 
 # ============================================================================
-# Real-Time API Mode
-# NOTE: Real-time implementation - verify API syntax matches your SDK version
-# ============================================================================
-
-def generate_single_image(task):
-    """Generate single image via real-time API with retry logic."""
-    img_b64 = image_to_base64(task['src'])
-    for attempt in range(API_RETRY_MAX_ATTEMPTS):
-        try:
-            response = client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=[{"parts": [
-                    {"text": task['prompt']},
-                    {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}}
-                ]}],
-                config=types.GenerateContentConfig(
-                    response_modalities=["TEXT", "IMAGE"],
-                    image_config=types.ImageConfig(
-                        aspect_ratio=task['ar'], 
-                        image_size=DEFAULT_IMAGE_SIZE
-                    )
-                )
-            )
-            for part in response.candidates[0].content.parts:
-                if hasattr(part, 'inline_data') and part.inline_data:
-                    os.makedirs(task['out_dir'], exist_ok=True)
-                    img = Image.open(BytesIO(base64.b64decode(part.inline_data.data)))
-                    img.save(task['out'], "JPEG", quality=JPEG_QUALITY)
-                    return True
-            return False
-        except Exception as e:
-            if '429' in str(e) or '503' in str(e):
-                delay = API_RETRY_BASE_DELAY_SECONDS * (attempt + 1)
-                log(f"Rate limited, waiting {delay}s...")
-                time.sleep(delay)
-            else:
-                log(f"Error: {e}")
-                return False
-    return False
-
-def run_realtime_mode(tasks):
-    """Run generation using real-time API."""
-    log(f"Starting real-time generation of {len(tasks)} images")
-    log(f"Rate: ~{60/MIN_REQUEST_INTERVAL:.0f} images/min")
-    success, failed = 0, 0
-    for task in tqdm(tasks, desc="Generating"):
-        if generate_single_image(task):
-            success += 1
-        else:
-            failed += 1
-        time.sleep(MIN_REQUEST_INTERVAL)
-    return success, failed
-
-# ============================================================================
-# Batch API Mode
+# Batch operations - resilient with retries
 # ============================================================================
 
 def create_batch_request(task, request_id):
@@ -271,300 +410,457 @@ def create_batch_request(task, request_id):
     }
 
 def write_batch_jsonl(tasks, output_file):
-    log(f"Creating batch file: {output_file}")
-    with open(output_file, 'w') as f:
-        for i, task in enumerate(tqdm(tasks, desc="Building JSONL")):
-            f.write(json.dumps(create_batch_request(task, str(i))) + '\n')
-    size_mb = os.path.getsize(output_file) / (1024 * 1024)
-    log(f"✓ Created {output_file} ({size_mb:.1f} MB)")
-
-def upload_file_resumable(filepath):
-    log(f"Uploading {filepath}...")
+    info(f"building JSONL for {len(tasks)} tasks...")
     try:
-        uploaded = client.files.upload(
-            file=filepath,
-            config=types.UploadFileConfig(mime_type="application/jsonl", display_name=os.path.basename(filepath))
-        )
-        log(f"✓ Uploaded: {uploaded.name}")
-        return uploaded.name
+        with open(output_file, 'w') as f:
+            for i, task in enumerate(tasks):
+                f.write(json.dumps(create_batch_request(task, str(i))) + '\n')
+        size_mb = os.path.getsize(output_file) / (1024 * 1024)
+        info(f"  ok {output_file} ({size_mb:.1f} MB)")
+        return True
     except Exception as e:
-        log(f"✗ Upload failed: {e}")
-        return None
+        err(f"could not write batch JSONL {output_file}", e)
+        return False
 
-def submit_batch_job(input_file_name):
-    log("Submitting batch job...")
-    try:
-        batch = client.batches.create(
-            model=GEMINI_MODEL,
-            src=types.BatchJobSource(file_name=input_file_name),
-            config=types.CreateBatchJobConfig(display_name=f"images-{datetime.now().strftime('%Y%m%d-%H%M%S')}")
-        )
-        log(f"✓ Batch created: {batch.name}")
-        return batch.name
-    except Exception as e:
-        log(f"✗ Submit failed: {e}")
-        return None
+def upload_with_retry(filepath):
+    for attempt in range(1, UPLOAD_MAX_RETRIES + 1):
+        try:
+            uploaded = client.files.upload(
+                file=filepath,
+                config=types.UploadFileConfig(
+                    mime_type="application/jsonl",
+                    display_name=os.path.basename(filepath)
+                )
+            )
+            info(f"  ok uploaded: {uploaded.name}")
+            return uploaded.name
+        except Exception as e:
+            delay = UPLOAD_RETRY_DELAY * attempt
+            warn(f"upload attempt {attempt}/{UPLOAD_MAX_RETRIES} failed for {filepath}: {e}", e)
+            if attempt < UPLOAD_MAX_RETRIES:
+                info(f"  retrying in {delay}s...")
+                time.sleep(delay)
+    err(f"upload permanently failed for {filepath} after {UPLOAD_MAX_RETRIES} attempts")
+    return None
 
-def download_batch_to_file(file_name, output_path):
-    """Stream download to disk to avoid RAM issues."""
-    url = f"https://generativelanguage.googleapis.com/v1beta/{file_name}:download?alt=media&key={API_KEY}"
-    log(f"Downloading to {output_path}...")
-    resp = requests.get(url, timeout=1800, stream=True)
-    resp.raise_for_status()
-    total = int(resp.headers.get('content-length', 0))
-    downloaded, last_print = 0, 0
-    with open(output_path, 'wb') as f:
-        for chunk in resp.iter_content(chunk_size=1024*1024):
-            if chunk:
-                f.write(chunk)
-                downloaded += len(chunk)
-                mb = downloaded / (1024 * 1024)
-                if mb - last_print >= 50:
-                    log(f"  {mb:.0f} / {total/(1024*1024):.0f} MB" if total else f"  {mb:.0f} MB")
-                    last_print = mb
-    log(f"Download complete: {downloaded/(1024*1024):.0f} MB")
+def submit_with_retry(input_file_name, chunk_idx):
+    for attempt in range(1, UPLOAD_MAX_RETRIES + 1):
+        try:
+            batch = client.batches.create(
+                model=GEMINI_MODEL,
+                src=types.BatchJobSource(file_name=input_file_name),
+                config=types.CreateBatchJobConfig(
+                    display_name=f"chunk{chunk_idx}-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+                )
+            )
+            info(f"  ok submitted batch: {batch.name}")
+            return batch.name
+        except Exception as e:
+            delay = UPLOAD_RETRY_DELAY * attempt
+            warn(f"submit attempt {attempt}/{UPLOAD_MAX_RETRIES} failed: {e}", e)
+            if attempt < UPLOAD_MAX_RETRIES:
+                info(f"  retrying in {delay}s...")
+                time.sleep(delay)
+    err(f"submit permanently failed for chunk {chunk_idx}")
+    return None
 
-def process_batch_results(results_path, tasks):
-    """Process results file line by line."""
+def download_with_retry(file_name, output_path):
+    for attempt in range(1, UPLOAD_MAX_RETRIES + 1):
+        try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/{file_name}:download?alt=media&key={API_KEY}"
+            info(f"  downloading results -> {output_path}")
+            resp = requests.get(url, timeout=1800, stream=True)
+            resp.raise_for_status()
+            total = int(resp.headers.get('content-length', 0))
+            downloaded, last_print = 0, 0
+            with open(output_path, 'wb') as f:
+                for chunk in resp.iter_content(chunk_size=1024*1024):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        mb = downloaded / (1024 * 1024)
+                        if mb - last_print >= 100:
+                            if total:
+                                info(f"    {mb:.0f} / {total/(1024*1024):.0f} MB")
+                            else:
+                                info(f"    {mb:.0f} MB")
+                            last_print = mb
+            info(f"  ok download complete: {downloaded/(1024*1024):.0f} MB")
+            return True
+        except Exception as e:
+            delay = UPLOAD_RETRY_DELAY * attempt
+            warn(f"download attempt {attempt}/{UPLOAD_MAX_RETRIES} failed: {e}", e)
+            if attempt < UPLOAD_MAX_RETRIES:
+                info(f"  retrying in {delay}s...")
+                time.sleep(delay)
+    err(f"download permanently failed for {file_name}")
+    return False
+
+def process_batch_results(results_path, task_map):
     success, failed = 0, 0
-    log(f"Processing results...")
-    with open(results_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            try:
-                result = json.loads(line.strip())
-                key = result.get('key')
-                if key is None: continue
-                task_idx = int(key)
-                if task_idx >= len(tasks): continue
-                task = tasks[task_idx]
-                if 'error' in result:
+    failed_details = []
+    try:
+        with open(results_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                try:
+                    result = json.loads(line.strip())
+                    key = result.get('key')
+                    if key is None:
+                        failed += 1
+                        err_logger.warning(f"result missing key field: {line[:200]}")
+                        continue
+                    task_idx = int(key)
+                    if task_idx >= len(task_map):
+                        failed += 1
+                        err_logger.warning(f"result key {task_idx} out of range")
+                        continue
+                    task = task_map[task_idx]
+                    if 'error' in result:
+                        failed += 1
+                        err_logger.error(f"api returned error for task {task_idx} ({task.get('out')}): {result['error']}")
+                        failed_details.append(task.get('out', '?'))
+                        continue
+                    candidates = result.get('response', {}).get('candidates', [])
+                    if not candidates:
+                        failed += 1
+                        err_logger.error(f"no candidates for task {task_idx} ({task.get('out')}): {json.dumps(result)[:500]}")
+                        failed_details.append(task.get('out', '?'))
+                        continue
+                    parts = candidates[0].get('content', {}).get('parts', [])
+                    saved = False
+                    for part in parts:
+                        if 'inlineData' in part:
+                            img_data = part['inlineData'].get('data')
+                            if img_data:
+                                os.makedirs(task['out_dir'], exist_ok=True)
+                                img = Image.open(BytesIO(base64.b64decode(img_data)))
+                                img.save(task['out'], "JPEG", quality=JPEG_QUALITY)
+                                success += 1
+                                saved = True
+                                break
+                    if not saved:
+                        failed += 1
+                        err_logger.error(f"no image part for task {task_idx} ({task.get('out')})")
+                        failed_details.append(task.get('out', '?'))
+                except Exception as e:
                     failed += 1
-                    continue
-                candidates = result.get('response', {}).get('candidates', [])
-                if not candidates:
-                    failed += 1
-                    continue
-                parts = candidates[0].get('content', {}).get('parts', [])
-                saved = False
-                for part in parts:
-                    if 'inlineData' in part:
-                        img_data = part['inlineData'].get('data')
-                        if img_data:
-                            os.makedirs(task['out_dir'], exist_ok=True)
-                            img = Image.open(BytesIO(base64.b64decode(img_data)))
-                            img.save(task['out'], "JPEG", quality=JPEG_QUALITY)
-                            success += 1
-                            saved = True
-                            if success % 50 == 0:
-                                log(f"  Saved {success} images...")
-                            break
-                if not saved:
-                    failed += 1
-            except:
-                failed += 1
-    return success, failed
+                    err_logger.error(f"could not process result line: {line[:200]}\n{traceback.format_exc()}")
+    except Exception as e:
+        err(f"could not read results file {results_path}", e)
+    return success, failed, failed_details
 
-def run_batch_mode(tasks):
-    """Run generation using batch API with chunking."""
-    os.makedirs(BATCH_FOLDER, exist_ok=True)
+# ============================================================================
+# Submission - incremental state save
+# ============================================================================
+
+def submit_all_chunks(tasks, state):
+    """Submit chunks one at a time, saving state after each.
+    Skips chunks already submitted in state file (resume safety)."""
     total_chunks = (len(tasks) + CHUNK_SIZE - 1) // CHUNK_SIZE
-    log(f"Splitting {len(tasks)} images into {total_chunks} batches ({CHUNK_SIZE} each)")
-    
-    all_batches = []
-    timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-    
-    # Submit all chunks
+    info(f"splitting {len(tasks)} tasks into {total_chunks} chunks of {CHUNK_SIZE}")
+
+    already_submitted = {b['chunk_idx'] for b in state['batches']}
+    if already_submitted:
+        info(f"resume mode: {len(already_submitted)} chunks already submitted, will skip")
+
+    timestamp = state['session_timestamp']
+
     for chunk_idx in range(total_chunks):
+        if chunk_idx in already_submitted:
+            continue
+
         start = chunk_idx * CHUNK_SIZE
         end = min(start + CHUNK_SIZE, len(tasks))
         chunk_tasks = tasks[start:end]
-        log(f"\n--- CHUNK {chunk_idx + 1}/{total_chunks} ({len(chunk_tasks)} images) ---")
-        
+        info(f"--- chunk {chunk_idx + 1}/{total_chunks} ({len(chunk_tasks)} imgs) ---")
+
         jsonl_file = os.path.join(BATCH_FOLDER, f"chunk{chunk_idx}_{timestamp}.jsonl")
         task_map_file = os.path.join(BATCH_FOLDER, f"taskmap{chunk_idx}_{timestamp}.json")
-        
-        write_batch_jsonl(chunk_tasks, jsonl_file)
-        with open(task_map_file, 'w') as f:
-            json.dump({'tasks': [{'out': t['out'], 'out_dir': t['out_dir']} for t in chunk_tasks]}, f)
-        
-        file_name = upload_file_resumable(jsonl_file)
-        if not file_name: continue
-        
-        batch_name = submit_batch_job(file_name)
-        if batch_name:
-            all_batches.append({'batch_name': batch_name, 'chunk_idx': chunk_idx, 'task_map_file': task_map_file})
-    
-    batches_file = os.path.join(BATCH_FOLDER, f"all_batches_{timestamp}.json")
-    with open(batches_file, 'w') as f:
-        json.dump(all_batches, f, indent=2)
-    log(f"\n✓ Submitted {len(all_batches)} batches. Info saved to {batches_file}")
-    
-    # Poll and download
-    log("\nWaiting for completion (1-24 hours typical)...")
-    log("Press Ctrl+C to exit - run with --resume to continue later\n")
-    
-    total_success, total_failed = 0, 0
-    pending = list(all_batches)
-    
-    while pending:
-        still_pending = []
-        for batch_info in pending:
-            try:
-                batch = client.batches.get(name=batch_info['batch_name'])
-                state = str(batch.state)
-                if 'SUCCEEDED' in state:
-                    log(f"✓ Chunk {batch_info['chunk_idx'] + 1} complete - downloading...")
-                    with open(batch_info['task_map_file']) as f:
-                        task_map = json.load(f)
-                    download_batch_to_file(batch.dest.file_name, TEMP_BATCH_FILE)
-                    s, f = process_batch_results(TEMP_BATCH_FILE, task_map['tasks'])
-                    total_success += s
-                    total_failed += f
-                    log(f"Chunk {batch_info['chunk_idx'] + 1}: ✓ {s} | ✗ {f}")
-                    if os.path.exists(TEMP_BATCH_FILE):
-                        os.remove(TEMP_BATCH_FILE)
-                elif 'FAILED' in state or 'CANCELLED' in state:
-                    log(f"✗ Chunk {batch_info['chunk_idx'] + 1} failed")
-                else:
-                    still_pending.append(batch_info)
-            except Exception as e:
-                still_pending.append(batch_info)
-        pending = still_pending
-        if pending:
-            log(f"Pending: {len(pending)}/{len(all_batches)} batches...")
-            time.sleep(60)
-    
-    return total_success, total_failed
 
-def resume_batches(batches_file):
-    """Resume monitoring and downloading from existing batches file."""
-    os.makedirs(LOG_FOLDER, exist_ok=True)
-    log(f"Resuming from {batches_file}")
-    with open(batches_file) as f:
-        all_batches = json.load(f)
-    
+        if not write_batch_jsonl(chunk_tasks, jsonl_file):
+            err(f"skipping chunk {chunk_idx} due to JSONL write failure")
+            continue
+
+        try:
+            with open(task_map_file, 'w') as f:
+                json.dump([{'out': t['out'], 'out_dir': t['out_dir'], 'fname': t['fname']}
+                           for t in chunk_tasks], f)
+        except Exception as e:
+            err(f"could not write task map {task_map_file}", e)
+            continue
+
+        file_name = upload_with_retry(jsonl_file)
+        if not file_name:
+            err(f"chunk {chunk_idx}: upload failed after all retries, skipping")
+            continue
+
+        batch_name = submit_with_retry(file_name, chunk_idx)
+        if not batch_name:
+            err(f"chunk {chunk_idx}: submit failed after all retries, skipping")
+            continue
+
+        state['batches'].append({
+            'chunk_idx': chunk_idx,
+            'batch_name': batch_name,
+            'task_map_file': task_map_file,
+            'submitted_at': now_iso(),
+            'status': 'pending',
+            'completed_at': None,
+        })
+        save_state(state)
+        info(f"chunk {chunk_idx + 1}/{total_chunks} submitted + state saved")
+
+        if chunk_idx < total_chunks - 1:
+            time.sleep(INTER_SUBMIT_DELAY)
+
+    info(f"submission phase done: {len(state['batches'])} batches active")
+
+# ============================================================================
+# Polling loop
+# ============================================================================
+
+def poll_loop(state):
+    """Poll all pending batches until done. Crash-safe via state file."""
+    info("entering polling loop. safe to leave running. ctrl+c to exit, re-run script to resume.")
+    info(f"poll interval: {POLL_INTERVAL}s")
+
     total_success, total_failed = 0, 0
-    pending = list(all_batches)
-    
-    while pending:
-        still_pending = []
+    poll_count = 0
+    start_time = datetime.now(timezone.utc)
+
+    while True:
+        poll_count += 1
+        pending = [b for b in state['batches'] if b['status'] == 'pending']
+        if not pending:
+            break
+
+        elapsed_total = int((datetime.now(timezone.utc) - start_time).total_seconds())
+        h = elapsed_total // 3600
+        m = (elapsed_total % 3600) // 60
+        info(f"poll #{poll_count} | {len(pending)}/{len(state['batches'])} pending | total elapsed {h}h {m}m")
+
         for batch_info in pending:
             try:
                 batch = client.batches.get(name=batch_info['batch_name'])
-                state = str(batch.state)
-                if 'SUCCEEDED' in state:
-                    log(f"✓ Chunk {batch_info['chunk_idx'] + 1} complete - downloading...")
-                    with open(batch_info['task_map_file']) as f:
-                        task_map = json.load(f)
-                    download_batch_to_file(batch.dest.file_name, TEMP_BATCH_FILE)
-                    s, f = process_batch_results(TEMP_BATCH_FILE, task_map['tasks'])
+                state_str = str(batch.state)
+                elapsed = elapsed_since(batch_info['submitted_at'])
+
+                if 'SUCCEEDED' in state_str:
+                    info(f"  ok chunk {batch_info['chunk_idx'] + 1} SUCCEEDED after {elapsed}, downloading...")
+                    temp_dl = os.path.join(LOG_FOLDER, f"batch_dl_chunk{batch_info['chunk_idx']}.jsonl")
+
+                    if not download_with_retry(batch.dest.file_name, temp_dl):
+                        err(f"chunk {batch_info['chunk_idx']}: download failed, will retry next poll")
+                        continue
+
+                    try:
+                        with open(batch_info['task_map_file']) as f:
+                            task_map = json.load(f)
+                    except Exception as e:
+                        err(f"could not load task map {batch_info['task_map_file']}", e)
+                        continue
+
+                    s, fl, failed_list = process_batch_results(temp_dl, task_map)
                     total_success += s
-                    total_failed += f
-                    log(f"Chunk {batch_info['chunk_idx'] + 1}: ✓ {s} | ✗ {f}")
-                    if os.path.exists(TEMP_BATCH_FILE):
-                        os.remove(TEMP_BATCH_FILE)
-                elif 'FAILED' in state or 'CANCELLED' in state:
-                    log(f"✗ Chunk {batch_info['chunk_idx'] + 1} failed")
+                    total_failed += fl
+                    info(f"  chunk {batch_info['chunk_idx'] + 1}: ok {s} saved | fail {fl}")
+
+                    if failed_list:
+                        failed_log = os.path.join(LOG_FOLDER,
+                            f"failed_chunk{batch_info['chunk_idx']}_{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt")
+                        with open(failed_log, 'w') as f:
+                            f.write('\n'.join(failed_list))
+                        warn(f"  {len(failed_list)} failures logged to {failed_log}")
+
+                    batch_info['status'] = 'downloaded'
+                    batch_info['completed_at'] = now_iso()
+                    batch_info['success_count'] = s
+                    batch_info['failed_count'] = fl
+                    save_state(state)
+
+                    if os.path.exists(temp_dl):
+                        os.remove(temp_dl)
+
+                elif 'FAILED' in state_str:
+                    err(f"chunk {batch_info['chunk_idx'] + 1} batch FAILED after {elapsed} (state={state_str})")
+                    batch_info['status'] = 'failed'
+                    batch_info['completed_at'] = now_iso()
+                    save_state(state)
+
+                elif 'CANCELLED' in state_str:
+                    err(f"chunk {batch_info['chunk_idx'] + 1} batch CANCELLED after {elapsed}")
+                    batch_info['status'] = 'cancelled'
+                    batch_info['completed_at'] = now_iso()
+                    save_state(state)
+
                 else:
-                    still_pending.append(batch_info)
+                    if POLL_HEARTBEAT:
+                        info(f"  chunk {batch_info['chunk_idx'] + 1}: {state_str} ({elapsed} elapsed)")
+
             except Exception as e:
-                still_pending.append(batch_info)
-        pending = still_pending
-        if pending:
-            log(f"Pending: {len(pending)}/{len(all_batches)} batches...")
-            time.sleep(60)
-    
-    log(f"\n{'='*60}")
-    log(f"RESUME COMPLETE: ✓ {total_success} | ✗ {total_failed}")
+                warn(f"poll error for chunk {batch_info['chunk_idx']}: {e}", e)
+
+        still_pending = [b for b in state['batches'] if b['status'] == 'pending']
+        if still_pending:
+            time.sleep(POLL_INTERVAL)
+
+    info("all batches resolved.")
     return total_success, total_failed
 
 # ============================================================================
 # Main
 # ============================================================================
 
+def print_summary(state):
+    info("=" * 60)
+    info("BATCH SUMMARY")
+    counts = {}
+    for b in state['batches']:
+        counts[b['status']] = counts.get(b['status'], 0) + 1
+    for status, c in counts.items():
+        info(f"  {status}: {c}")
+    info("=" * 60)
+
 def main():
-    print("="*60)
-    print("AI Image Generation Pipeline")
-    print("="*60)
-    
-    # Handle resume command
-    if len(sys.argv) > 2 and sys.argv[1] == '--resume':
-        resume_batches(sys.argv[2])
-        return
-    
+    print("=" * 60)
+    print("AI Image Generation Pipeline - BATCH MODE")
+    print(f"Model: {GEMINI_MODEL}")
+    print("=" * 60)
+
     if not API_KEY or not client:
-        print("✗ API key not found")
+        err("api key missing - put your raw key as only contents of apikey.txt")
         return
-    
+
+    info("verifying api key (free)...")
+    ok, msg = verify_api_key()
+    if ok:
+        info(f"ok {msg}")
+    else:
+        err(msg)
+        return
+
     if not os.path.exists(INPUT_FOLDER):
-        print(f"✗ {INPUT_FOLDER} not found")
+        err(f"{INPUT_FOLDER} not found")
         return
-    
+
     os.makedirs(OUTPUT_FOLDER, exist_ok=True)
-    os.makedirs(LOG_FOLDER, exist_ok=True)
-    
+
     shot_cfg, cat_cfg = load_config()
     if not shot_cfg or not cat_cfg:
         return
-    
-    # Test mode selection
-    print("\n" + "="*60)
-    print("TEST MODE?")
-    print("  y = 1 variant per shot type (fast, cheap, for testing)")
-    print("  n = full production variants")
-    print("="*60)
-    test_choice = input("\nTest mode? (y/n): ").strip().lower()
-    use_test_mode = test_choice in ['y', 'yes']
-    
-    if use_test_mode:
-        print("→ Using TEST mode (1 variant each)")
-    else:
-        print("→ Using PRODUCTION mode (full variants)")
-    
-    variants = VARIANTS_TEST if use_test_mode else VARIANTS_PRODUCTION
-    
-    tasks, skipped = build_tasks(shot_cfg, cat_cfg, variants)
-    print(f"\n✓ Already done: {skipped}")
-    print(f"→ To generate: {len(tasks)}")
-    
-    if not tasks:
-        print("\n✓ All images complete!")
+
+    state = load_state()
+    if state:
+        # empty state file = leftover garbage from previous abort. just delete it.
+        if not state.get('batches'):
+            info("found empty state file (leftover from prior abort) - removing")
+            try:
+                os.remove(STATE_FILE)
+            except Exception as e:
+                warn(f"could not remove empty state file: {e}", e)
+            state = None
+        else:
+            info(f"found existing state file with {len(state['batches'])} batches")
+            info(f"  session: {state['session_timestamp']}")
+            print_summary(state)
+            choice = input("\n[R]esume existing batches, [N]ew run (archive state), or [Q]uit? ").strip().lower()
+            if choice == 'q':
+                return
+            if choice == 'n':
+                os.rename(STATE_FILE, STATE_FILE + ".archived." + datetime.now().strftime('%Y%m%d-%H%M%S'))
+                state = None
+
+    if state is None:
+        # IN MEMORY ONLY - do NOT write to disk until a batch is actually submitted
+        state = {
+            'session_timestamp': datetime.now().strftime('%Y%m%d-%H%M%S'),
+            'model': GEMINI_MODEL,
+            'batches': [],
+        }
+        # (no save_state() here - was the bug)
+
+    info("scanning inputs and building task list...")
+    tasks, skipped = build_tasks(shot_cfg, cat_cfg, VARIANTS_PRODUCTION)
+    info(f"already complete on disk: {skipped}")
+    info(f"to generate: {len(tasks)}")
+
+    pending = [b for b in state['batches'] if b['status'] == 'pending']
+    if not tasks and not pending:
+        info("nothing to do!")
         return
-    
-    # API mode selection
-    print("\n" + "="*60)
-    print("SELECT API MODE:")
-    print("  [1] Real-time API  - $0.24/image, immediate results")
-    print("  [2] Batch API      - $0.12/image, 1-24 hour wait (50% savings)")
-    print("="*60)
-    print("⚠️  Check your Google API tier rate limits before proceeding!")
-    print("   Tier 1 (default): 10 images/min")
-    print("   Tier 2: 50/min | Tier 3: 100/min")
-    print("   https://ai.google.dev/pricing")
-    print("="*60)
-    
-    choice = input("\nEnter 1 or 2: ").strip()
-    
-    cost_rt = len(tasks) * 0.24
-    cost_batch = len(tasks) * 0.12
-    
-    if choice == '2':
-        print(f"\n💰 Batch mode: ${cost_batch:,.0f} (saving ${cost_rt - cost_batch:,.0f})")
-        input(f"Press Enter to submit {len(tasks)} images as batch jobs...")
-        copy_originals(tasks)
-        success, failed = run_batch_mode(tasks)
+
+    if tasks:
+        c = calculate_costs(tasks)
+
+        if len(pending) == 0:
+            print()
+            print("=" * 60)
+            print("COST ESTIMATE (derived from actual data + Google rates)")
+            print("=" * 60)
+            print(f"  images to generate:     {c['n']}")
+            print(f"  model:                  {GEMINI_MODEL}")
+            print(f"  resolution:             {DEFAULT_IMAGE_SIZE}")
+            print(f"  avg prompt tokens:      {c['avg_prompt_tokens']} (measured from your actual prompts)")
+            print(f"  output tokens/img:      {c['output_tokens_each']} (fixed by Google for {DEFAULT_IMAGE_SIZE})")
+            print(f"  input image tokens:     {TOKENS_PER_INPUT_IMAGE} (fixed by Google)")
+            print()
+            print(f"  rates (batch tier, $/M tokens):")
+            print(f"    text input:    ${TEXT_INPUT_RATE_PER_M:.2f}/M")
+            print(f"    image input:   ${IMAGE_INPUT_RATE_PER_M:.2f}/M")
+            print(f"    image output:  ${IMAGE_OUTPUT_RATE_PER_M:.2f}/M")
+            print()
+            print(f"  cost breakdown:")
+            print(f"    text prompts:   ${c['text_cost']:>8,.2f}  ({c['total_prompt_tokens']:,} tokens)")
+            print(f"    input images:   ${c['img_in_cost']:>8,.2f}  ({c['n'] * TOKENS_PER_INPUT_IMAGE:,} tokens)")
+            print(f"    output images:  ${c['img_out_cost']:>8,.2f}  ({c['n'] * c['output_tokens_each']:,} tokens)")
+            print(f"    {'-'*40}")
+            print(f"    TOTAL (batch):  ${c['total_batch']:>8,.2f}")
+            print(f"    per-image avg:  ${c['per_img_batch']:.4f}")
+            print()
+            print(f"  reference: real-time API would be ~${c['total_realtime']:,.2f} (2x batch)")
+            print("=" * 60)
+            print()
+            print("monitor live spend: https://aistudio.google.com/usage")
+            print()
+
+            confirm1 = input(f"submit {c['n']} images for ~${c['total_batch']:,.2f}? [y/N]: ").strip().lower()
+            if confirm1 != 'y':
+                info("aborted by user (first confirmation) - no state file written, no charges")
+                return
+
+            print()
+            print(f"  *** FINAL CONFIRM: this will charge approximately ${c['total_batch']:,.2f}")
+            print(f"      to the billing account linked to your api key.")
+            confirm2 = input(f"      type YES (uppercase) to proceed: ").strip()
+            if confirm2 != 'YES':
+                info("aborted by user (second confirmation) - no state file written, no charges")
+                return
+
+            info("confirmed, beginning submission...")
+            # state file gets created here for the first time, only as batches actually submit
+            copy_originals(tasks)
+            submit_all_chunks(tasks, state)
+        else:
+            info(f"existing pending batches detected - skipping new submission, going to polling")
     else:
-        est_minutes = len(tasks) * MIN_REQUEST_INTERVAL / 60
-        print(f"\n💰 Real-time: ${cost_rt:,.0f}")
-        print(f"⏱  Estimated: {est_minutes:.0f} min ({est_minutes/60:.1f} hours)")
-        input(f"Press Enter to start generating {len(tasks)} images...")
-        copy_originals(tasks)
-        success, failed = run_realtime_mode(tasks)
-    
-    print(f"\n{'='*60}")
-    print(f"COMPLETE: ✓ {success} generated | ✗ {failed} failed")
+        info(f"resuming polling of {len(pending)} pending batches (no new work)")
+
+    success, failed = poll_loop(state)
+
+    print()
+    print("=" * 60)
+    print(f"COMPLETE: ok {success} generated | fail {failed} failed")
     print(f"Output: {OUTPUT_FOLDER}/")
-    print("="*60)
+    print(f"Errors log: {ERROR_LOG}")
+    print("=" * 60)
+    print_summary(state)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print()
+        info("interrupted by user. state saved. re-run script to resume.")
+    except Exception as e:
+        err("fatal error in main", e)
+        raise
